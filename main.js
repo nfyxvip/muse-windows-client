@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.7.1).
+ * Muse Windows Client — a simple unofficial wrapper (v0.7.2).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -73,6 +73,14 @@
  * Copy / Save toolbar appears at the bottom-right of the selected
  * region; double-clicking inside the region (or pressing Enter)
  * copies it straight to the clipboard.
+ *
+ * v0.7.2 fixes the connector sign-in flow: popups and navigations
+ * to agent.meta.ai and the providers' login pages (Google,
+ * Microsoft, Apple) now open in-app, so the connect page gets a
+ * real popup window and the OAuth flow can finish and report back.
+ * Before this, those popups were denied and sent to the external
+ * browser, so window.open returned null and the web app reported
+ * "无法打开连接页面".
  *
  * Phase 6 (v0.7.0):
  * - Cloud service entries: a "Connect" window that jumps to the
@@ -189,10 +197,26 @@ function loadTrayImage() {
   return nativeImage.createEmpty();
 }
 
-function isMuseUrl(url) {
+// Hosts allowed to open as in-app popups / navigations. The connector
+// and sign-in flows need a real popup window: the connect page lives
+// on agent.meta.ai and OAuth goes through the provider's login page.
+// Denying those makes window.open return null, and the web app
+// reports "无法打开连接页面" even though the browser tab did open.
+// Everything else still opens in the default browser.
+const POPUP_HOSTS = new Set([
+  'muse.ai',
+  'www.muse.ai',
+  'agent.meta.ai',
+  'accounts.google.com',
+  'login.microsoftonline.com',
+  'login.live.com',
+  'appleid.apple.com',
+]);
+
+function isPopupAllowedUrl(url) {
   try {
     const u = new URL(url);
-    return u.protocol === 'https:' && (u.hostname === 'muse.ai' || u.hostname === 'www.muse.ai');
+    return u.protocol === 'https:' && POPUP_HOSTS.has(u.hostname);
   } catch (_) {
     return false;
   }
@@ -312,8 +336,10 @@ function createWindow() {
   mainWindow.webContents.on('did-finish-load', applyZoom);
 
   // Open external links in the default browser, not inside the app.
+  // Connector / sign-in popups (agent.meta.ai, provider login pages)
+  // open in-app so the flow can finish and report back.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isMuseUrl(url)) return { action: 'allow' };
+    if (isPopupAllowedUrl(url)) return { action: 'allow' };
     openExternal(url);
     return { action: 'deny' };
   });
@@ -325,7 +351,7 @@ function createWindow() {
       handleUnhandledDrop(url);
       return;
     }
-    if (!isMuseUrl(url)) {
+    if (!isPopupAllowedUrl(url)) {
       event.preventDefault();
       openExternal(url);
     }
@@ -437,7 +463,7 @@ function createQuickChatWindow() {
     }
   });
   quickChatWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isMuseUrl(url)) return { action: 'allow' };
+    if (isPopupAllowedUrl(url)) return { action: 'allow' };
     openExternal(url);
     return { action: 'deny' };
   });
@@ -447,7 +473,7 @@ function createQuickChatWindow() {
       handleUnhandledDrop(url);
       return;
     }
-    if (!isMuseUrl(url)) {
+    if (!isPopupAllowedUrl(url)) {
       event.preventDefault();
       openExternal(url);
     }
@@ -2280,6 +2306,7 @@ module.exports = {
   searchFileNames,
   toggleFavoriteFile,
   CLOUD_SERVICES,
+  isPopupAllowedUrl,
   listCaptureSources,
   captureSource,
   canAutomate,
