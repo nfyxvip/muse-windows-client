@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.7.2).
+ * Muse Windows Client — a simple unofficial wrapper (v0.7.3).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -81,6 +81,14 @@
  * Before this, those popups were denied and sent to the external
  * browser, so window.open returned null and the web app reported
  * "无法打开连接页面".
+ *
+ * v0.7.3 fixes region screenshot double-click: clicking inside an
+ * existing selection no longer restarts the selection (which used
+ * to clear it before the double-click could fire), the Copy/Save
+ * toolbar now appears immediately on mouse-up instead of waiting
+ * for the capture, and a copy/save requested before the capture
+ * finishes is queued and runs as soon as it lands. The overlay
+ * also gets a ✕ button and slightly lighter dimming.
  *
  * Phase 6 (v0.7.0):
  * - Cloud service entries: a "Connect" window that jumps to the

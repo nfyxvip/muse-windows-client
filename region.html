@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>框选区域 — Muse</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: rgba(0,0,0,0.35); cursor: crosshair; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: rgba(0,0,0,0.25); cursor: crosshair; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
   .hint {
     position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
     background: rgba(0,0,0,0.75); color: #fff; padding: 8px 16px;
@@ -36,12 +36,13 @@
 </style>
 </head>
 <body>
-<div class="hint">拖拽框选要截取的区域，松开确认；双击区域直接复制；按 Esc 取消</div>
+<div class="hint">拖拽框选要截取的区域，松开确认；双击区域直接复制；点选区外重新框选；点 ✕ 或按 Esc 取消</div>
 <div id="sel"></div>
 <div id="label"></div>
 <div id="toolbar">
   <button id="copyBtn" type="button">复制</button>
   <button id="saveBtn" type="button">保存</button>
+  <button id="cancelBtn" type="button" title="取消">✕</button>
 </div>
 <script>
 (function () {
@@ -50,7 +51,9 @@
   const toolbar = document.getElementById('toolbar');
   let start = null;
   let lastRect = null; // last confirmed selection, in screen DIP coordinates
-  let captured = false; // true once the toolbar is showing
+  let captured = false; // true once the main process has captured the region
+  let pendingCopy = false; // copy requested before the capture finished
+  let pendingSave = false; // save requested before the capture finished
 
   function rectFrom(a, b) {
     return {
@@ -59,6 +62,10 @@
       width: Math.abs(b.x - a.x),
       height: Math.abs(b.y - a.y),
     };
+  }
+
+  function inside(rect, x, y) {
+    return !!rect && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
   }
 
   function draw(r) {
@@ -79,6 +86,8 @@
     toolbar.style.display = 'none';
     lastRect = null;
     captured = false;
+    pendingCopy = false;
+    pendingSave = false;
   }
 
   function showToolbar(r) {
@@ -94,13 +103,30 @@
     toolbar.style.top = top + 'px';
   }
 
-  function inside(rect, x, y) {
-    return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+  function requestCopy() {
+    if (!lastRect) return;
+    if (captured) window.museRegion.copy();
+    else pendingCopy = true; // capture still running; copy as soon as it lands
+  }
+
+  async function doSave() {
+    const r = await window.museRegion.save();
+    // If the save dialog was cancelled, keep the toolbar open so Copy still works.
+    return r;
+  }
+
+  function requestSave() {
+    if (!lastRect) return;
+    if (captured) doSave();
+    else pendingSave = true; // capture still running; save as soon as it lands
   }
 
   document.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if (e.target.closest('#toolbar')) return; // clicks on the toolbar are its own
+    // Clicking inside the existing selection keeps it (so double-click
+    // and the toolbar keep working); click outside to draw a new one.
+    if (inside(lastRect, e.clientX, e.clientY)) return;
     hideSelection();
     start = { x: e.clientX, y: e.clientY };
   });
@@ -114,33 +140,30 @@
     start = null;
     if (r.width >= 4 && r.height >= 4) {
       lastRect = r;
+      draw(r);
+      showToolbar(r); // show immediately; the capture runs in the background
       window.museRegion.selectRect(r);
     } else {
       hideSelection();
     }
   });
   document.addEventListener('dblclick', (e) => {
-    if (captured && lastRect && inside(lastRect, e.clientX, e.clientY)) {
-      window.museRegion.copy();
-    }
+    if (inside(lastRect, e.clientX, e.clientY)) requestCopy();
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.museRegion.cancel();
-    if (e.key === 'Enter' && captured) window.museRegion.copy();
+    if (e.key === 'Enter' && lastRect) requestCopy();
   });
 
-  document.getElementById('copyBtn').addEventListener('click', () => window.museRegion.copy());
-  document.getElementById('saveBtn').addEventListener('click', async () => {
-    const r = await window.museRegion.save();
-    if (r && r.ok === false && r.reason === 'cancelled') {
-      // Save dialog cancelled: keep the toolbar open so Copy still works.
-    }
-  });
+  document.getElementById('copyBtn').addEventListener('click', requestCopy);
+  document.getElementById('saveBtn').addEventListener('click', requestSave);
+  document.getElementById('cancelBtn').addEventListener('click', () => window.museRegion.cancel());
 
-  // Shown by the main process once the region has been captured.
+  // Fired by the main process once the region has been captured.
   window.museRegion.onCaptured((info) => {
     captured = true;
-    if (lastRect) showToolbar(lastRect);
+    if (pendingCopy) { pendingCopy = false; window.museRegion.copy(); }
+    if (pendingSave) { pendingSave = false; doSave(); }
   });
 })();
 </script>
