@@ -1,0 +1,283 @@
+# Muse Windows 客户端：功能对标分析与分阶段路线图
+
+> 目标：按官方 Mac 桌面客户端为蓝本，为 mingzhen 打造最全面的 Windows 客户端（Windows 10 / 11，64 位）。
+> 本文档只是分析（Phase 0），不做新功能开发。
+> 前提要先说清楚：**当前 Windows 客户端只是一个 Electron 壳子，打开的是网页版 muse.ai；它没有官方后端接口。** Mac 客户端很多能力是“官方客户端 + Muse 后端 + 系统配对”三方配合才能实现的，单靠一个本地壳子复制不了。这一点下面每一项都会如实标注，不夸大。
+
+- 现有版本：v0.2.0（Electron 38，electron-builder 26，electron-updater 6.8.11；Phase 1 已于 2026-11-13 完成，见第 4 节）
+- 现有文件：`main.js`、`preload.js`、`package.json`、`build/icon.png` / `icon.ico`、`README.md`
+- Mac 功能依据：`~/docs/client-surfaces.md`（Mac app 一节）、`~/docs/devices/mac_app.md`
+- 目标系统：Windows 10 / 11（64 位）
+
+---
+
+## 1. Mac 客户端功能清单
+
+### (a) 聊天界面（Chat surface）
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 主窗口 | 在 Mac 窗口里显示网页版，标签页是 Chat、Feed、Ideas、Goals、Library，和网页版一致 |
+| 设置与审批 | 设置、审批卡片都是网页版那套；在 Mac 上设置用 Cmd-, 打开，Log out 在设置列表最后一项，Mac 菜单栏的 Muse 菜单里 Log out 在 Quit 上面 |
+| 聊天搜索 | 网页版的搜索能力（Cmd+K 等），在 Mac 窗口里同样可用 |
+| 共享进 Muse | Mac 上没有单独说明；iOS / Android 有分享扩展，Mac 客户端本身不强调这一点 |
+
+**Windows 对标：** Electron 的 `BrowserWindow` 直接加载 `https://muse.ai`，已基本做到。聊天、Feed、Ideas、Goals、Library、审批卡片全部来自网页版，不需要本地重写。
+
+### (b) 菜单栏 / 快捷聊天 / 悬浮按钮 / 开机启动
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 菜单栏图标 | 有 Open Muse、Quick chat、Voice dictation、Check for updates…（下载好后变 Install update…）、Quit；没有 Settings、Log out 这一行；关掉 Muse 窗口不会退出应用 |
+| 悬浮按钮 | 可选开启，平时停留在屏幕上，点一下重新打开窗口；新安装默认关闭，开关在 Settings > General > Show floating button |
+| Quick chat（快捷聊天） | 按 Option-Spacebar，在当前最前面的应用上方弹出一个小聊天卡片；再按一次关闭；文件可以拖进 Quick chat，也可以拖到悬浮按钮上；快捷键可在 Settings > General > Shortcuts > Quick Chat 里改 |
+| 开机启动 | Settings > General > Run on startup |
+
+**Windows 对标：** Electron 有 `Tray`（系统托盘）、`globalShortcut`、`BrowserWindow`（可做小窗口）、`app.setLoginSettings({ openAtLogin })`。悬浮按钮在 Windows 上没有系统级“永远置顶小球”的标准做法，需要自己做一个置顶小窗口模拟。
+
+### (c) 听写 / 语音
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 随处听写 | 按住 fn 键，对着当前最前面的应用听写，不只是在 Muse 里听写 |
+| 权限 | 需要麦克风和 Accessibility 权限，安装时由应用索取 |
+| 按键与模式 | 按键在 Settings > Dictation 里改；Push to talk 是按住说话，Hands-free 是点一下说话 |
+| 语音控制 | 账号开了语音时，Voice controls 出现在 Dictation 里的一行，而不是单独的标签页 |
+
+**Windows 对标：** Windows 有 Windows 语音识别 / 语音输入（Win+H）、Web Speech API、Azure Speech、本地 Whisper 等多条路。Electron 里可以直接用 Web Speech API（依赖 Chromium / 网络），也可以接本地 Whisper 模型做离线转写，或接云端语音服务。**但“对着任意应用听写、把文字打进别的软件”需要系统级输入注入，在 Windows 上要靠 UI Automation / SendInput，权限和稳定性都比 Mac 弱，且容易被杀毒软件拦截。**
+
+### (d) 文件系统访问与拖放
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 文件系统访问 | Settings 里有专门的 File system access 标签页：Full Disk Access，可选 Read only、Read and interact、Off；针对 Mail.app、Messages.app、Notes.app、WhatsApp.app 各自开关；还有一个 Blocked folders 列表 |
+| 拖放 | 文件可以拖进 Quick chat，也可以拖到悬浮按钮上 |
+
+**Windows 对标：** Electron 有 `dialog.showOpenDialog / showSaveDialog`（用户每次选文件 / 文件夹）、拖放事件（`webContents` 的 `will-attach-webview` / HTML5 拖放）、`fs` 读写。Windows 没有和 macOS Full Disk Access 完全对应的开关；对应的是：每次让用户选文件夹（最安全）、或申请管理员权限、或被 Windows 受控文件夹访问（Controlled folder access）挡住。**可以做到“用户选了哪个文件夹，就能读哪个文件夹”，但做不到 Mac 那种“一次授权，全盘按只读 / 可读写分级 + 按应用分级 + 黑名单文件夹”的精细模型。**
+
+### (e) 电脑使用（控制应用 / 窗口、浏览器、截屏、相机）
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 控制应用和窗口 | `computer.control`：在选定的窗口里后台操作，用户可以继续用 Mac；操作不会把应用带到最前面；Mac 应用里有一张预览卡显示被控制的窗口，聊天框里的 Stop 可以结束任务 |
+| 控制浏览器 | 在用户自己的浏览器、正常登录的个人资料里做网页工作；Chrome 是在用户已有的某个 Chrome 窗口里新开一个标签页，不是新建资料、不是重新登录；浏览器在你自己的电脑上是另一个浏览器，没有 Mac 上的登录状态 |
+| 不能做的事 | Mac 上没有 shell / 程序运行器，脚本和终端命令不能在 Mac 上跑；控制会跳过 Muse 应用本身、WhatsApp、Messages、终端和脚本应用、密码管理器、iPhone Mirroring；用户可以在 Settings > Computer use 里再屏蔽更多应用 |
+| 权限 | 控制应用和窗口需要 Mac 的 Accessibility 和 Screen Recording 权限；控制前先请用户批准，除非用户在设置里选了总是允许；审批卡会列出这次控制包含的步骤；用户可以允许或拒绝，允许可以覆盖本次任务的剩余部分 |
+| 截屏 | `screen.snap`：只在当前请求确实需要 Mac 屏幕像素时才截屏 |
+| 相机 | `camera.snap`：只在用户要求用 Mac 相机拍照时才拍照，每次请求一张 |
+
+**Windows 对标：** Electron 自带 `desktopCapturer`（截屏 / 录屏源）、`getUserMedia`（相机 / 麦克风）。控制别的 Windows 应用则没有 Electron 原生接口，要靠 `nut.js` / `robotjs`、PowerShell + Windows UI Automation、Win32 `SendInput` 等。**最关键的一点：Mac 的电脑使用是“Muse 后端发指令 → 官方 Mac 客户端执行 → 回报结果”的闭环，有审批卡、预览卡、Stop、屏蔽列表。我们的 Windows 壳子是本地程序，没有这条后端通道，Muse 的 agent（在云端虚拟机里）指挥不了你 Windows 电脑上的应用。本地能做的是“你在 Windows 上点一下，壳子帮你做一步自动化”，而不是“你在手机上发一句话，远端 agent 替你操作 Windows”。**
+
+### (f) 本地应用数据（Notes、Messages、Mail、Calendar、Reminders、Contacts、WhatsApp 本地搜索）
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| Notes / Messages / Mail | 通过 `notes.*`、`imessage.*`、`email.*` 读写 Mac 本地应用的数据；Messages 发 iMessage / 短信、Mail 发邮件会真的发给别人，发一次就要核对，不要重复发 |
+| Calendar / Reminders / Contacts | 通过 `calendar.*`、`reminders.*`、`contacts.*` 读写 |
+| WhatsApp 本地搜索 | 搜索 Mac 本地 WhatsApp 消息库；**只搜索，不发消息，也不提供主动的 WhatsApp 更新** |
+| 数据口径 | 本地应用返回的数据是“这台 Mac 的视图”，不要说成是云端账号的完整状态 |
+| 权限 | 每个本地应用要在 Mac 应用的 Settings 里单独打开，并由 Mac 弹出系统权限；读取可以设为允许、每次询问、关闭；发送消息 / 邮件要问用户；对一个人可以选仅此一次、总是允许这个收件人、拒绝；总是允许只覆盖那个收件人，不覆盖整个应用；欧盟用户每次发送只有仅此一次或拒绝；群消息、或 Mac 解析不出的收件人，每次都要问，除非用户把那个应用设为允许写入 |
+
+**Windows 对标：** Windows 上没有 Apple 的 Notes / iMessage / Mail / Reminders。最接近的本地应用是 Outlook（新版）/ Windows Mail（已逐步停用）、Microsoft To Do、Windows 日历、People（联系人）、OneNote。读这些应用的数据要走各自的路：Microsoft Graph（需要微软账号授权、联网）、本地 PST / OST 文件（格式复杂、经常被 Outlook 锁定）、Windows 搜索索引。WhatsApp Desktop 在 Windows 上的本地消息库是加密的，没有官方 API 可供读取；WeChat、QQ 等同样没有官方本地读取接口。**结论：这一组在 Windows 上基本无法按 Mac 的方式复制，只能退而求其次——优先接云端账号（Gmail / Outlook / Google 日历等，本来就有连接器），而不是去读 Windows 本地应用的私有数据库。**
+
+### (g) 通知
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 通知 | Mac 应用没有推送通知；只有在运行时才能通知用户 |
+| 开关 | Settings > General 里有一个 Allow notifications 开关，跟着 Mac 自己的通知权限走 |
+
+**Windows 对标：** Electron 有 `Notification` API + Windows Toast 通知，可以做到“应用运行时弹出通知、点通知打开窗口”。**和 Mac 一样，应用关掉后没有推送。** 真正的手机推送要走 Muse 后端，壳子自己发不出来。
+
+### (h) 自动更新
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 自动更新 | 应用自己更新；Check for updates… 在菜单栏图标、Muse 菜单、Settings > General 里都有；没有应用商店上架 |
+
+**Windows 对标：** Electron 有 `electron-updater`，配合 GitHub Releases 或自建更新服务器可以做自动更新。**难点不在代码，在分发：** 没有代码签名证书时，Windows SmartScreen 会弹警告；没有 EV 证书时警告更明显。更新服务器要自己搭（GitHub Releases 是最省事的），版本号、更新通道（stable / beta）也要自己定。
+
+### (i) 设备配对 / 权限
+
+| 功能 | Mac 上是什么样 |
+|---|---|
+| 设备配对 | Mac 应用把用户的 Mac 配对成一台设备；发给这台设备的命令在用户的 Mac 上跑，不在 agent 的电脑上跑；Mac 的文件、应用、窗口、屏幕、相机、Chrome 个人资料、本地应用数据，都和 agent 电脑上的对应物分开 |
+| 权限总览 | Permissions 里列出 Mac 自己的应用（"On this Mac"）；Computer use 标签页显示 Accessibility 和 Screen Recording 状态、每条命令的策略、Keep screen awake、Blocked apps 列表 |
+| 审批 | 敏感操作先请用户批准，审批卡列出步骤；用户可以允许、拒绝，或设为总是允许 |
+
+**Windows 对标：** **无法复制。** 设备配对是 Muse 官方后端的能力：官方客户端向后端注册这台设备，后端才知道往哪里发指令、如何做审批、如何回传结果。我们的壳子没有官方的设备注册接口、没有审批通道、没有回传通道。本地能做的是一个“设置页”，把本机权限状态（麦克风、相机、通知、开机启动）列出来、让用户自己开关，但这只是本地开关，不是 Muse 后端的配对。
+
+---
+
+## 2. 逐项可行性分析
+
+可行性分三档：**✅ 可做**（Electron / Windows API 就能做）、**⚠️ 部分可做**（能做本地版，但做不到 Mac 的完整体验，或需要额外服务 / 证书 / 用户授权）、**❌ 无官方 API 无法完整复制**（需要 Muse 官方后端接口，壳子没有）。
+
+| # | 功能 | Mac 做法 | Windows 等效技术 | 可行性 | 被什么挡住 | v0.1 状态 |
+|---|---|---|---|---|---|---|
+| A1 | 主窗口聊 Muse | Mac 窗口里显示网页版 | Electron `BrowserWindow` 加载 `https://muse.ai` | ✅ 可做 | 无 | ✅ 已做 |
+| A2 | Chat / Feed / Ideas / Goals / Library 标签页 | 网页版自带 | 网页版自带，无需本地实现 | ✅ 可做 | 无 | ✅ 已做（随网页版） |
+| A3 | 设置、审批卡 | 网页版自带 | 网页版自带 | ✅ 可做 | 无 | ✅ 已做（随网页版） |
+| A4 | 聊天搜索 | 网页版自带 | 网页版自带 | ✅ 可做 | 无 | ✅ 已做（随网页版） |
+| B1 | 菜单栏 / 托盘图标 | macOS 菜单栏图标 | Electron `Tray` + Windows 通知区域 | ✅ 可做 | 无 | ✅ 已做（托盘） |
+| B2 | 关窗口不退出 | 关闭窗口不退出应用 | `close` 事件拦截 + `hide()` | ✅ 可做 | 无 | ✅ 已做 |
+| B3 | 悬浮按钮 | 屏幕上常驻小球，点开窗口 | 自制置顶小窗口（`alwaysOnTop`、`frame: false`、圆形）模拟 | ⚠️ 部分可做 | Windows 没有系统级悬浮球；自制小窗口会被全屏游戏 / 某些应用盖住，且需要自己处理拖动、贴边、显隐 | ❌ 未做 |
+| B4 | Quick chat 小窗口 | Option-Spacebar 弹出小聊天卡，可拖文件进去 | `BrowserWindow` 小窗口 + `globalShortcut` + 拖放 | ✅ 可做 | 需另开一个窗口加载 muse.ai 的精简视图或同一会话；网页版没有“精简聊天”入口，只能复用主窗口或新开一个小窗口加载同一网址 | ❌ 未做 |
+| B5 | 全局快捷键（可改） | Settings > Shortcuts 可改 | `globalShortcut` + 设置页保存自定义按键 | ✅ 可做 | 快捷键可能被别的软件占用，注册失败要提示 | ⚠️ 部分：已做固定 Ctrl+Alt+M，未做自定义 |
+| B6 | 开机自启动 | Settings > General > Run on startup | `app.setLoginSettings({ openAtLogin })` | ✅ 可做 | 无 | ✅ 已做（托盘开关，默认关） |
+| C1 | 网页内语音输入 | 网页版自带语音输入（若有） | Web Speech API / Chromium 语音输入 | ⚠️ 部分可做 | 依赖网络和浏览器语音服务；中文识别质量看服务；离线要接本地模型 | ❌ 未做 |
+| C2 | 随处听写（对任意应用打字） | 按住 fn，对最前面的应用听写 | Windows 语音输入（Win+H）调用 / `SendInput` 注入文字 + 语音转文字服务 | ⚠️ 部分可做 | 需要系统级注入，易被杀毒软件拦截；识别 + 注入的延迟和准确率不如 Mac 原生；不能保证在所有应用里都生效 | ❌ 未做 |
+| C3 | 听写按键 / 模式设置 | Settings > Dictation 可改 | 设置页 + `globalShortcut` | ✅ 可做 | 只是设置界面本身可做；真正的听写能力看 C2 | ❌ 未做 |
+| D1 | 文件选择器（选文件 / 文件夹） | 系统文件选择器 | Electron `dialog.showOpenDialog` | ✅ 可做 | 无 | ❌ 未做（只做了窗口内网页的默认行为） |
+| D2 | 拖文件进聊天 | 拖进 Quick chat / 悬浮按钮 | HTML5 拖放 + Electron `webContents` 文件拖放事件 | ✅ 可做 | 网页版是否接受拖入的文件，看 muse.ai 网页本身的支持；壳子只能把文件路径 / 内容递给页面，不能保证网页端一定收 | ❌ 未做 |
+| D3 | 文件系统访问分级（只读 / 可读写 / 关闭，按应用分级，黑名单文件夹） | Settings 专页 + Full Disk Access | Windows 没有对应模型；只能做到“每次让用户选文件夹”或“记住已授权文件夹列表 + 黑名单”自制 | ⚠️ 部分可做 | 没有系统级 Full Disk Access；管理员权限、受控文件夹访问会挡；按应用分级无从谈起（壳子只有一个应用） | ❌ 未做 |
+| D4 | 读取本地文件给 Muse 看 | Mac 上 agent 可读 Mac 文件 | 壳子本地读文件后，由用户在聊天里上传 / 粘贴；或通过网页版的文件上传入口 | ⚠️ 部分可做 | 壳子不能直接把本地文件塞进云端 agent 的上下文；最终还是要走网页版上传或用户手动发 | ❌ 未做 |
+| E1 | 截屏 | `screen.snap`，按需截屏 | Electron `desktopCapturer.getSources` + `navigator.mediaDevices.getDisplayMedia` | ✅ 可做（本地） | 截屏本身可做；但“agent 在云端发指令、壳子回传截图”没有后端通道，只能本地触发 | ❌ 未做 |
+| E2 | 相机拍照 | `camera.snap`，每次一张 | `getUserMedia({ video: true })` | ✅ 可做（本地） | 同 E1，只能本地触发，不能由远端 agent 发起 | ❌ 未做 |
+| E3 | 控制别的 Windows 应用 / 窗口 | `computer.control`，后台操作，不抢前台，有预览卡和 Stop | `nut.js` / `robotjs` / PowerShell + UI Automation / Win32 `SendInput` | ⚠️ 部分可做（本地自动化） | 没有 agent 远端控制通道；后台操作、不抢前台在 Windows 上很难保证；预览卡、Stop、屏蔽列表要自己做；杀毒软件常拦截 | ❌ 未做 |
+| E4 | 控制用户浏览器（用用户已登录的 Chrome） | 在用户已有 Chrome 窗口新开标签页，用原有登录状态 | Chrome DevTools Protocol（需用户手动启动带调试端口的 Chrome）或 Playwright 连接已有浏览器 | ⚠️ 部分可做 | 需要用户配合启动调试模式 Chrome；不能自动拿到用户 Chrome 的登录状态；有安全风险 | ❌ 未做 |
+| E5 | 在 Windows 上跑脚本 / 终端命令 | Mac 上明确不支持 | Electron 本地可跑 `child_process`（PowerShell / CMD） | ⚠️ 部分可做（本地） | 壳子本地跑命令是技术上可行的，但**绝不能**让网页版 / 远端随意触发，否则等于留了后门；只能做成用户本地明确点的按钮，且要白名单 | ❌ 未做（也不建议做成远端可触发） |
+| F1 | Notes（备忘录） | Mac Notes 应用数据 | Windows 无对应应用；最接近 OneNote（需 Microsoft Graph） | ❌ 无法完整复制 | 没有 Apple Notes；OneNote 要走微软账号和 Graph API，不是本地读取 | ❌ 未做 |
+| F2 | Messages（iMessage / 短信） | Mac Messages 应用数据，可发消息 | Windows 无 iMessage；短信要走手机连接（Phone Link）或运营商 | ❌ 无法完整复制 | 没有官方接口；Phone Link 是微软的另一套体系，不对第三方开放 agent 通道 | ❌ 未做 |
+| F3 | Mail（邮件） | Mac Mail 应用数据，可发邮件 | Windows：Outlook / 新版 Outlook；要走 Microsoft Graph 或本地 PST（常被锁定） | ⚠️ 部分可做（走云端） | 本地 Mail 应用读取不可复制；退而求其次是接 Gmail / Outlook 云端账号（Muse 已有连接器） | ❌ 未做（云端邮箱请用 Muse 连接器） |
+| F4 | Calendar（日历） | Mac 日历 | Windows 日历 / Outlook 日历；走 Microsoft Graph 或 Google Calendar API | ⚠️ 部分可做（走云端） | 本地日历读取不可复制；云端日历已有连接器 | ❌ 未做（云端日历请用 Muse 连接器） |
+| F5 | Reminders（提醒事项） | Mac Reminders | Microsoft To Do（Graph API） | ⚠️ 部分可做（走云端） | 本地提醒事项不可复制；云端 To Do 可接 | ❌ 未做 |
+| F6 | Contacts（联系人） | Mac Contacts | Windows People / Outlook 联系人（Graph API） | ⚠️ 部分可做（走云端） | 本地联系人读取不可复制；云端联系人可接 | ❌ 未做 |
+| F7 | WhatsApp 本地搜索 | 搜索 Mac 本地 WhatsApp 消息库，只搜不发 | WhatsApp Desktop（Windows）本地库是加密的，无官方 API | ❌ 无法完整复制 | 没有官方本地读取接口；不要尝试破解数据库 | ❌ 未做 |
+| G1 | 应用内通知（运行时） | 只有运行时才能通知 | Electron `Notification` + Windows Toast | ✅ 可做 | 应用关掉后没有通知，和 Mac 一样 | ❌ 未做 |
+| G2 | 推送通知（应用关掉后） | Mac 也没有 | 需要 Muse 后端推送 | ❌ 无法完整复制 | 壳子自己发不出推送；要等官方支持 | ❌ 未做 |
+| H1 | 检查更新 | 菜单栏 / 菜单 / 设置里都有 | `electron-updater` + 设置页按钮 | ✅ 可做 | 需要更新服务器（GitHub Releases 最省事） | ❌ 未做 |
+| H2 | 自动下载并安装更新 | 应用自己更新 | `electron-updater` 自动下载 + 下次启动安装 | ✅ 可做 | 需要代码签名，否则 SmartScreen 弹警告；无 EV 证书时警告更明显 | ❌ 未做 |
+| I1 | 设备配对（把 Windows 配对成 Muse 设备） | 官方 Mac 客户端向后端注册设备 | 无官方接口 | ❌ 无法完整复制 | **这是最大的挡板。** 没有官方设备注册、审批、回传通道，壳子永远成不了“配对设备” | ❌ 未做 |
+| I2 | 权限总览页（本机权限状态） | Permissions 页列出本机应用和权限 | 设置页列出麦克风、相机、通知、开机启动等本地开关状态 | ✅ 可做 | 只是本地状态展示，不是后端配对 | ❌ 未做 |
+| I3 | 审批卡 / 每次询问 / 总是允许 | 敏感操作先审批 | 本地审批弹窗 + 记住用户选择（按操作 / 按收件人） | ⚠️ 部分可做（本地） | 本地审批只能管壳子自己的操作，管不了云端 agent 的操作；不能冒充官方审批卡 | ❌ 未做 |
+
+**不能完整复制的清单（先说清楚，免得后面白做）：**
+
+1. **设备配对（I1）**——没有官方后端接口，壳子成不了配对设备。
+2. **电脑使用（E3 / E4）的远端版**——Muse 的 agent 在云端指挥不了你 Windows 电脑上的应用；本地自动化可以做，但不是同一回事。
+3. **本地应用数据（F1 / F2 / F7）**——Apple Notes、iMessage、WhatsApp 本地库在 Windows 上没有对应物或没有官方接口。
+4. **推送通知（G2）**——应用关掉后的推送要走官方后端，壳子发不出来。
+5. **随处听写（C2）的完整版**——系统级注入在 Windows 上权限、稳定性、杀毒软件三重受限，只能做降级版。
+
+**可以退而求其次的：** F3–F6（Mail / Calendar / Reminders / Contacts）不要去读 Windows 本地应用，改走云端账号（Gmail、Outlook、Google 日历），Muse 本来就有这些连接器，体验更接近 Mac。
+
+---
+
+## 3. 当前 v0.1 状态（按功能）
+
+| 类别 | 已做 | 未做 |
+|---|---|---|
+| 聊天界面 | 主窗口加载 muse.ai；Chat / Feed / Ideas / Goals / Library / 设置 / 审批卡随网页版；外部链接在默认浏览器打开 | 无本地增强 |
+| 菜单栏 / 托盘 / 启动 | 托盘图标、点托盘显示 / 隐藏、右键菜单（显示 / 隐藏、重新加载、开机自启动、快捷键开关、关闭行为、设置、检查更新、退出）、关闭窗口最小化到托盘、Ctrl+Alt+M 全局快捷键、开机自启动开关（默认关，v0.2.0 起会持久化）、菜单（文件 / 查看 / 帮助）、最小设置窗口、窗口大小 / 位置与缩放记忆、检查更新（electron-updater，仅检查 + 提示） | 悬浮按钮、Quick chat 小窗口、快捷键自定义（按键本身还不能改，只能开关）、通知 |
+| 听写 / 语音 | 无 | 全部未做 |
+| 文件访问 / 拖放 | 无（只有网页版默认行为） | 文件选择器、拖放、授权文件夹列表、黑名单 |
+| 电脑使用 / 截屏 / 相机 | 无 | 全部未做 |
+| 本地应用数据 | 无 | 全部未做（建议改走云端连接器） |
+| 通知 | 无 | 应用内通知、通知开关 |
+| 自动更新 | 无 | 检查更新、自动下载安装、更新服务器 |
+| 设备配对 / 权限 | 无 | 全部无法复制；权限总览页可做本地版 |
+
+**v0.1 已验证的：** Linux 虚拟机上 `npm install` 通过（319 个包，Electron 38.8.6），`node --check main.js / preload.js` 通过；便携版 `Muse Windows Client-0.1.0-portable.exe`（89 MB，PE32）已打出；NSIS 安装包在 Linux 上因缺少 `wine` 失败，需在 Windows 上打。
+
+**v0.1 未验证的：** 没有在 Windows 上真正运行过。登录、托盘、Ctrl+Alt+M、开机自启动在 Windows 上的实际表现都还没确认。
+
+---
+
+## 4. 分阶段路线图
+
+> 原则：先让它在 Windows 上真正能用、能装、能更新，再做花哨的功能；每做完一个阶段，都在 mingzhen 的 Windows 电脑上实测一次再进入下一阶段。不急，慢慢做，做扎实。
+
+### Phase 0 — 分析（已完成）
+
+- **交付：** 本文档 `FEATURE_ANALYSIS.md`。
+- **需要 mingzhen 做的事：** 看一遍，确认优先级的取舍（特别是第 5 节的 3 个优先功能是否同意）。
+- **风险：** 无。
+
+### Phase 1 — 核心打磨 + Windows 实测 + 安装包 + 自动更新（已完成，2026-11-13）
+
+- **交付：**
+  - 在 mingzhen 的 Windows 10 / 11 电脑上实测 v0.1 便携版：打开、登录、关窗口进托盘、托盘菜单、Ctrl+Alt+M、开机自启动，逐项打勾。
+  - 修掉实测发现的问题（重点是：托盘图标、快捷键冲突、窗口大小 / 缩放、外部链接处理）。
+  - 开机自启动状态持久化（现在每次启动都重置为关，改成记住上次的选择）。
+  - 在 Windows 上打出 NSIS 安装包（`npm run dist`），确认安装、桌面快捷键、开始菜单、卸载都正常。
+  - 接入 `electron-updater` + GitHub Releases 做检查更新（先只做“检查 + 提示 + 手动下载”，不做静默自动安装）；设置页 / 菜单里加“检查更新”。
+  - 补一个简单的设置页（或先用托盘菜单 + 配置文件）：开机自启动、关闭时最小化到托盘还是直接退出、快捷键开关。
+- **需要 mingzhen 做的事：** 在 Windows 电脑上运行一次便携版，把遇到的问题原样告诉 Edison（截图 / 报错文字）；确认要不要装 NSIS 安装版；提供一个 GitHub 仓库（或同意用现有仓库）放更新包（如果要做自动更新）。
+- **风险：** 没有代码签名证书时，Windows SmartScreen 会弹警告，用户要手动点“仍要运行”；这是正常的，需要在 README 里写清楚。NSIS 安装包如果在 Windows 上也失败，要先看报错再修，不要硬猜。
+
+**Phase 1 完成情况（2026-11-13，v0.2.0）：代码部分已完成，Windows 实测部分待 mingzhen 在真机上做。**
+- 已做：`config.js` 设置持久化（窗口大小 / 位置、缩放、关闭行为、快捷键开关、开机自启动、启动时检查更新，非法值校验，损坏配置不崩溃）；开机自启动不再每次启动被重置（v0.1 bug 已修）；最小设置窗口（`settings.html` + `settings-preload.js`）+ 托盘菜单开关；托盘图标按顺序尝试 `.ico` / `.png`；快捷键注册失败时托盘提示 + 菜单标注，不崩溃；窗口位置超出屏幕时自动回主显示器；`electron-updater` 接入（启动后静默检查 + 手动检查，只检查 + 提示，不静默下载安装），更新仓库占位为 `mingzhen/muse-windows-client`；单实例；版本号升到 0.2.0；README、CHANGELOG 已更新。
+- Linux 虚拟机上已验证：`node --check` 全部通过；`config.js` 在真实 Electron 里跑通过（默认值、保存、重读、非法值校验）；主程序用 Xvfb 跑约 15 秒无崩溃，托盘图标警告已消除；muse.ai 页面因虚拟机代理证书问题打不开，属环境限制，不是应用问题。
+- 待 mingzhen 在 Windows 10 / 11 真机上做：按 README 的“Windows 实测清单”逐项确认（打开、登录、托盘、快捷键、开机自启动、设置持久化、窗口恢复、检查更新、NSIS 安装 / 卸载）；提供 GitHub 仓库（或确认是否用占位仓库名）以便更新检查真正工作；确认是否需要 NSIS 安装版（Linux 上因缺少 `wine` 打不出来，需在 Windows 上打）。
+
+### Phase 2 — 快捷聊天 / 托盘 / 快捷键 / 通知 / 设置
+
+- **交付：**
+  - Quick chat 小窗口：全局快捷键（默认 Ctrl+Alt+M，可改）弹出一个小聊天窗口，再按一次关闭；小窗口加载 muse.ai（和主窗口同一登录分区）。
+  - 悬浮按钮：一个可拖动的置顶小窗口（模拟 Mac 的悬浮按钮），点一下打开主窗口；可开关，默认关闭。
+  - 快捷键自定义：设置页里改 Quick chat 快捷键、显示 / 隐藏主窗口快捷键；注册失败时提示冲突。
+  - 应用内通知：Electron `Notification` + Windows Toast；有新消息 / 任务完成时（以网页版能触发的为准）在运行时弹通知，点通知打开窗口；设置里可关。
+  - 完整的设置页：外观（窗口大小记忆、缩放）、启动（开机自启动、启动时最小化到托盘）、托盘（关闭时行为）、快捷键、通知、检查更新、关于。
+- **需要 mingzhen 做的事：** 在 Windows 上试 Quick chat 和悬浮按钮，确认快捷键有没有和别的软件冲突、悬浮按钮会不会挡事、通知弹不弹。
+- **风险：** Quick chat 的网页版没有精简入口，只能复用完整 muse.ai 页面，小窗口里会显得挤；悬浮按钮是自制置顶窗口，全屏游戏 / 视频时可能被盖住或挡住别人，要留一键关闭。
+
+### Phase 3 — 文件拖放与本地文件访问（带权限）
+
+- **交付：**
+  - 拖文件进聊天：把文件拖到主窗口 / Quick chat / 悬浮按钮上，壳子把文件交给网页版的上传入口（能传的走网页版，不能传的提示原因）。
+  - 文件选择器：菜单 / 快捷键打开系统文件选择器，选中的文件同样交给网页版。
+  - 授权文件夹：设置页里加“已授权文件夹”列表（用户自己一个一个加）和“黑名单文件夹”；壳子只读已授权的文件夹，未授权的一律拒绝并提示。
+  - 最近文件：可选，记住最近打开过的本地文件（只记路径，不记内容），方便下次快速找。
+- **需要 mingzhen 做的事：** 试拖一个文件（例如 CI4 电商项目的代码文件）进聊天，看能不能正常上传 / 发给 Edison；确认授权文件夹的交互是否好用。
+- **风险：** 网页版是否接受拖入的文件，最终由 muse.ai 网页决定，壳子不能保证；不要为了“方便”给壳子开全盘读取权限，坚持“用户选了才读”。
+
+### Phase 4 — 听写 / 语音
+
+- **交付：**
+  - 先做网页内语音输入：接 Web Speech API（在线）或本地 Whisper（离线，二选一，先做在线的，离线作为可选）。
+  - 再做降级版随处听写：托盘菜单 / 快捷键启动听写，识别出文字后，由用户确认再粘贴到当前应用（先不做自动注入，或只做“复制到剪贴板，用户自己粘贴”这一档最安全的）。
+  - 听写设置页：开关、快捷键、语言（中文 / 英文）、模式（按住说话 / 点一下说话）。
+- **需要 mingzhen 做的事：** 在 Windows 上试中文语音识别准确率、延迟，确认能不能接受；确认随处听写要不要做到“自动打进别的软件”，还是“复制后自己粘贴”就够了。
+- **风险：** 在线语音依赖网络和第三方服务；离线 Whisper 模型较大，首次下载慢；系统级注入容易被杀毒软件拦截，**不要**把注入做成默认开启。
+
+### Phase 5 — 电脑使用 / 截屏 / 相机（带权限）
+
+- **交付：**
+  - 截屏：菜单 / 快捷键截取当前屏幕或指定窗口，截图可直接发进聊天（走网页版上传）。
+  - 相机拍照：调用摄像头拍一张，同样可发进聊天。
+  - 本地自动化（明确划界）：只做用户在本地明确点的操作，例如“打开记事本 / 打开某个文件夹 / 打开某个网址”，用白名单 + 每次确认；**不做远端 agent 触发、不做后台静默控制、不做键盘鼠标录制回放。**
+  - 权限页：截屏、相机、自动化三项各自开关，默认全部关闭；每次首次使用时弹窗说明并请用户确认；加一个“已屏蔽应用”列表。
+- **需要 mingzhen 做的事：** 试截屏和相机，确认画质和速度；确认本地自动化的白名单里要放哪些应用（例如只允许打开浏览器 / 文件夹，还是也允许打开 VS Code 等）。
+- **风险：** 这是最容易被杀毒软件和 Windows 安全策略盯上的阶段；自动化一旦做过了头，会变成安全隐患。**宁可少做，不要多做。** 远端 agent 控制 Windows 这一项明确不做，见第 2 节。
+
+### Phase 6 — 本地应用集成（走云端，不读本地私有库）
+
+- **交付：**
+  - **不做**本地私有库读取（Apple Notes / iMessage / WhatsApp 本地库、Outlook PST 等），原因见第 2 节。
+  - 做云端集成入口：在壳子里加一个“连接”入口，引导用户去 muse.ai 网页版连接 Gmail / Outlook / Google 日历 / Microsoft To Do 等（这些本来就有连接器），连接成功后在 Windows 客户端里就能直接用。
+  - 做本地文件搜索的轻量版：只搜已授权文件夹里的文件名（不读内容、不建全盘索引），方便在聊天里快速找到项目文件发给 Edison。
+- **需要 mingzhen 做的事：** 确认最常用的是哪几个云端账号（Gmail 还是 Outlook、日历用哪个），优先把那几个的连接流程在 Windows 客户端里跑通。
+- **风险：** 不要为了“像 Mac 一样”去破解 WhatsApp / 微信的本地数据库，这是红线；云端账号的授权要走官方连接器，不要在壳子里存密码。
+
+---
+
+## 5. 优先推荐：先做哪 3 个（日常使用最有感）
+
+| 优先级 | 功能 | 为什么先做它 |
+|---|---|---|
+| 1 | **Phase 1：Windows 实测 + NSIS 安装包 + 自动更新** | 现在的 v0.1 还没在 Windows 上真正跑过，安装包也没在 Windows 上打出来。先把它变成“能装、能用、能更新”的正常软件，后面所有功能才有意义。 |
+| 2 | **Phase 2：Quick chat + 悬浮按钮 + 快捷键自定义 + 设置页** | 这是 Mac 客户端日常最常用的部分，也是 Windows 壳子最容易做好的部分。做好后，不用每次都切回主窗口，隨手按个快捷键就能问 Edison 一句，体验提升最大。 |
+| 3 | **Phase 3：文件拖放 + 授权文件夹** | mingzhen 正在做 CI4 电商项目，每天都要和代码文件打交道。能直接把文件拖进聊天发给 Edison，比每次在网页版里点上传要顺得多，而且“用户选了才读”的权限模型也最安全。 |
+
+**不建议先做的：** Phase 5 的电脑使用和 Phase 6 的本地应用集成。这两组要么需要官方后端（做不了），要么安全风险高、收益不确定，先放后面，等前面三个阶段稳定了再慢慢啃。
+
+---
+
+## 附：版本与维护建议
+
+- 版本号：v0.1.0 → Phase 1 完成后升到 v0.2.0，Phase 2 完成后 v0.3.0，以此类推；每个阶段发一个版本，不要攒大招。
+- 更新渠道：先用 GitHub Releases 做更新源，`electron-updater` 只做检查 + 提示，不做静默安装；等稳定了再考虑自动下载。
+- 代码签名：没有证书时 SmartScreen 会弹警告，这是正常的；如果以后要正式分发，再考虑买代码签名证书（不便宜，先不用急）。
+- 测试清单（每个阶段都要在 mingzhen 的 Windows 电脑上过一遍）：打开、登录、关窗口进托盘、托盘菜单、快捷键、开机自启动、安装、卸载、更新提示、拖文件、截屏 / 相机（到 Phase 5 时）。
+- 安全底线：不存密码、不存 Token、不读未授权的文件夹、不做远端触发的自动化、不破解任何应用的本地数据库。

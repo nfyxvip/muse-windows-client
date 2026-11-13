@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>设置 — Muse Windows Client</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; }
+  .wrap { padding: 20px 22px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #666; margin: 0 0 18px; font-size: 13px; }
+  section { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+  section h2 { font-size: 14px; margin: 0 0 10px; }
+  label.row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; cursor: pointer; }
+  label.row input { margin-top: 2px; }
+  .hint { color: #666; font-size: 12px; line-height: 1.6; margin: 4px 0 0 26px; }
+  .btns { display: flex; gap: 10px; margin-top: 6px; }
+  button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { font-size: 12px; color: #666; margin-top: 10px; min-height: 18px; }
+  .ver { color: #888; font-size: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>设置</h1>
+  <p class="sub">设置会立刻保存，下次启动时自动恢复。</p>
+
+  <section>
+    <h2>启动与托盘</h2>
+    <label class="row"><input type="checkbox" id="autoStart"> 开机自启动</label>
+    <label class="row"><input type="checkbox" id="minimizeToTray"> 关闭窗口时最小化到托盘（取消勾选则直接退出）</label>
+    <p class="hint">关闭窗口后，应用仍在托盘里运行；要真正退出，请用托盘菜单里的“退出”。</p>
+  </section>
+
+  <section>
+    <h2>快捷键</h2>
+    <label class="row"><input type="checkbox" id="shortcutEnabled"> 启用全局快捷键 Ctrl+Alt+M（显示 / 隐藏窗口）</label>
+    <p class="hint" id="shortcutHint">如果这个快捷键被别的软件占用了，注册会失败，主窗口仍可正常使用。</p>
+  </section>
+
+  <section>
+    <h2>显示</h2>
+    <label class="row"><input type="checkbox" id="resetZoom"> 下次启动时把页面缩放恢复为 100%</label>
+    <p class="hint">当前缩放：<span id="zoomNow">100%</span>。也可以在主窗口菜单“查看”里随时放大 / 缩小。</p>
+  </section>
+
+  <section>
+    <h2>更新</h2>
+    <label class="row"><input type="checkbox" id="checkUpdatesOnStartup"> 启动后自动检查更新（只检查，有新版本时才提示）</label>
+    <div class="btns"><button id="checkBtn" type="button">检查更新</button></div>
+    <p class="hint">更新只检查 + 提示，不会静默下载或安装。更新包来自 GitHub Releases，需要先配置好更新仓库（见 README）。</p>
+  </section>
+
+  <div class="btns"><button class="primary" id="closeBtn" type="button">完成</button></div>
+  <div id="status"></div>
+  <div class="ver" id="version"></div>
+</div>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const status = (msg) => { $('status').textContent = msg || ''; };
+
+  async function load() {
+    try {
+      const s = await window.museSettings.get();
+      $('autoStart').checked = !!s.autoStart;
+      $('minimizeToTray').checked = s.closeBehaviour !== 'quit';
+      $('shortcutEnabled').checked = !!s.shortcutEnabled;
+      $('checkUpdatesOnStartup').checked = !!s.checkUpdatesOnStartup;
+      $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
+      $('version').textContent = 'Muse Windows Client（非官方）· 每次改动都会立刻保存到本机配置文件';
+    } catch (e) {
+      status('读取设置失败：' + e.message);
+    }
+  }
+
+  async function save(patch) {
+    try {
+      const s = await window.museSettings.set(patch);
+      $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
+      status('已保存。');
+    } catch (e) {
+      status('保存失败：' + e.message);
+    }
+  }
+
+  $('autoStart').addEventListener('change', (e) => save({ autoStart: e.target.checked }));
+  $('minimizeToTray').addEventListener('change', (e) => save({ closeBehaviour: e.target.checked ? 'minimize-to-tray' : 'quit' }));
+  $('shortcutEnabled').addEventListener('change', (e) => save({ shortcutEnabled: e.target.checked }));
+  $('checkUpdatesOnStartup').addEventListener('change', (e) => save({ checkUpdatesOnStartup: e.target.checked }));
+  $('resetZoom').addEventListener('change', async (e) => {
+    if (e.target.checked) { await save({ zoomFactor: 1.0 }); e.target.checked = false; }
+  });
+  $('checkBtn').addEventListener('click', async () => {
+    $('checkBtn').disabled = true;
+    status('正在检查更新…');
+    try { await window.museSettings.checkForUpdates(); } catch (e) { status('检查更新失败：' + e.message); }
+    $('checkBtn').disabled = false;
+    status('');
+  });
+  $('closeBtn').addEventListener('click', () => window.museSettings.close());
+
+  load();
+})();
+</script>
+</body>
+</html>
