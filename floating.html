@@ -37,6 +37,20 @@
     if (window.museFloating) window.museFloating.toggleMain();
   });
   btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+  // Files dropped on the button never reach the web page, so the
+  // shell handles them directly (authorised-folders check + copy).
+  window.addEventListener('dragover', function (e) { e.preventDefault(); });
+  window.addEventListener('drop', function (e) {
+    e.preventDefault();
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    var paths = [];
+    for (var i = 0; i < files.length; i++) {
+      if (files[i] && files[i].path) paths.push(files[i].path);
+    }
+    if (paths.length > 0 && window.museFloating) window.museFloating.sendFiles(paths);
+  });
 })();
 </script>
 </body>

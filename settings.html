@@ -18,7 +18,11 @@
   .field input[type="text"] { flex: 1; min-width: 0; font-size: 14px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
   .hint { color: #666; font-size: 12px; line-height: 1.6; margin: 4px 0 0 26px; }
   .warn { color: #b3261e; font-size: 12px; line-height: 1.6; margin: 4px 0 0 26px; }
-  .btns { display: flex; gap: 10px; margin-top: 6px; }
+  .list-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+  .list-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .list-empty { color: #888; font-size: 12px; padding: 4px 0; }
+  button.mini { font-size: 12px; padding: 3px 10px; }
+  button.linklike { border: none; background: none; color: #111; text-decoration: underline; padding: 3px 0; font-size: 13px; text-align: left; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
   button.primary { background: #111; color: #fff; border-color: #111; }
   button:disabled { opacity: 0.5; cursor: default; }
@@ -68,6 +72,25 @@
   </section>
 
   <section>
+    <h2>文件与授权文件夹</h2>
+    <p class="hint" style="margin:0 0 8px">壳子只会读取下面授权文件夹里的文件。拖文件进聊天、或用“发送文件到聊天”时，壳子会先核对：不在授权列表里的文件一律拒绝；黑名单里的文件夹即使在授权列表里也拒绝。授权之前，壳子什么文件都不读。</p>
+    <div class="btns"><button id="sendFileBtn" type="button">发送文件到聊天…</button></div>
+    <h3 style="font-size:13px;margin:14px 0 6px">已授权文件夹</h3>
+    <div id="authorizedList"></div>
+    <div class="btns"><button id="addAuthBtn" type="button">添加文件夹…</button></div>
+    <h3 style="font-size:13px;margin:14px 0 6px">黑名单文件夹（始终拒绝）</h3>
+    <div id="blockedList"></div>
+    <div class="btns"><button id="addBlockedBtn" type="button">添加文件夹…</button></div>
+  </section>
+
+  <section>
+    <h2>最近文件</h2>
+    <p class="hint" style="margin:0 0 8px">只记文件路径，不记内容。点一下可以重新复制到剪贴板。</p>
+    <div id="recentList"></div>
+    <div class="btns"><button id="clearRecentBtn" type="button">清空最近文件</button></div>
+  </section>
+
+  <section>
     <h2>显示</h2>
     <label class="row"><input type="checkbox" id="resetZoom"> 下次启动时把页面缩放恢复为 100%</label>
     <p class="hint">当前缩放：<span id="zoomNow">100%</span>。也可以在主窗口菜单“查看”里随时放大 / 缩小。</p>
@@ -104,6 +127,75 @@
     }
   }
 
+  let currentSettings = null;
+
+  function renderFolderList(el, items, key, emptyText) {
+    el.innerHTML = '';
+    if (!items.length) {
+      const d = document.createElement('div');
+      d.className = 'list-empty';
+      d.textContent = emptyText;
+      el.appendChild(d);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      const span = document.createElement('span');
+      span.className = 'list-path';
+      span.textContent = item;
+      span.title = item;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mini';
+      btn.textContent = '删除';
+      btn.addEventListener('click', async () => {
+        const next = (currentSettings[key] || []).filter((x) => x !== item);
+        const s = await save({ [key]: next });
+        if (s) renderLists(s);
+      });
+      row.appendChild(span);
+      row.appendChild(btn);
+      el.appendChild(row);
+    });
+  }
+
+  function renderRecent(items) {
+    const el = $('recentList');
+    el.innerHTML = '';
+    if (!items.length) {
+      const d = document.createElement('div');
+      d.className = 'list-empty';
+      d.textContent = '还没有发送过文件。';
+      el.appendChild(d);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'list-row';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'linklike';
+      btn.textContent = item;
+      btn.title = item;
+      btn.addEventListener('click', async () => {
+        try {
+          const r = await window.museSettings.copyRecentFile(item);
+          status(r && r.ok ? '已复制到剪贴板。' : '复制失败：文件可能已被移动、删除，或不在授权文件夹里。');
+        } catch (e) { status('复制失败：' + e.message); }
+      });
+      row.appendChild(btn);
+      el.appendChild(row);
+    });
+  }
+
+  function renderLists(s) {
+    currentSettings = s;
+    renderFolderList($('authorizedList'), s.authorizedFolders || [], 'authorizedFolders', '还没有授权文件夹。');
+    renderFolderList($('blockedList'), s.blockedFolders || [], 'blockedFolders', '没有黑名单文件夹。');
+    renderRecent(s.recentFiles || []);
+  }
+
   async function load() {
     try {
       const s = await window.museSettings.get();
@@ -119,6 +211,7 @@
       $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
       $('version').textContent = 'Muse Windows Client（非官方）· 每次改动都会立刻保存到本机配置文件';
       showShortcutStatus(s);
+      renderLists(s);
     } catch (e) {
       status('读取设置失败：' + e.message);
     }
@@ -129,6 +222,7 @@
       const s = await window.museSettings.set(patch);
       $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
       showShortcutStatus(s);
+      renderLists(s);
       status('已保存。');
       return s;
     } catch (e) {
@@ -182,6 +276,44 @@
     } catch (e) { status('发送测试通知失败：' + e.message); }
   });
   $('closeBtn').addEventListener('click', () => window.museSettings.close());
+  $('sendFileBtn').addEventListener('click', async () => {
+    try { await window.museSettings.sendFiles(); } catch (e) { status('打开文件选择器失败：' + e.message); }
+  });
+  $('addAuthBtn').addEventListener('click', async () => {
+    try {
+      const dir = await window.museSettings.selectFolder();
+      if (!dir) return;
+      const list = [...(currentSettings.authorizedFolders || [])];
+      if (!list.includes(dir)) list.push(dir);
+      const s = await save({ authorizedFolders: list });
+      if (s) renderLists(s);
+    } catch (e) { status('添加文件夹失败：' + e.message); }
+  });
+  $('addBlockedBtn').addEventListener('click', async () => {
+    try {
+      const dir = await window.museSettings.selectFolder();
+      if (!dir) return;
+      const list = [...(currentSettings.blockedFolders || [])];
+      if (!list.includes(dir)) list.push(dir);
+      const s = await save({ blockedFolders: list });
+      if (s) renderLists(s);
+    } catch (e) { status('添加文件夹失败：' + e.message); }
+  });
+  $('clearRecentBtn').addEventListener('click', async () => {
+    try {
+      await window.museSettings.clearRecent();
+      const s = await window.museSettings.get();
+      renderLists(s);
+      status('最近文件已清空。');
+    } catch (e) { status('清空失败：' + e.message); }
+  });
+  // Keep the recent list fresh when files are sent while Settings is open.
+  window.addEventListener('focus', async () => {
+    try {
+      const s = await window.museSettings.get();
+      renderLists(s);
+    } catch (_) { /* keep the current view */ }
+  });
 
   load();
 })();

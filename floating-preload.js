@@ -10,4 +10,5 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('museFloating', {
   toggleMain: () => ipcRenderer.invoke('floating-toggle-main'),
+  sendFiles: (paths) => ipcRenderer.send('floating-drop-files', paths),
 });

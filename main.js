@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.3.0).
+ * Muse Windows Client — a simple unofficial wrapper (v0.4.0).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -27,6 +27,20 @@
  *   muse.ai are allowed/denied through it, and the app's own toasts
  *   honour it too.
  *
+ * Phase 3 (v0.4.0):
+ * - File drag & drop: dropping a file on the main window / Quick chat
+ *   is first offered to the web page (muse.ai decides whether it
+ *   accepts the drop). If the page does not handle it, the shell
+ *   steps in: it checks the authorised-folders list and copies the
+ *   file's content (text, up to 512 KB) or its path (binary / large)
+ *   to the clipboard, so the user can paste it into the chat.
+ * - File picker: File menu / tray "发送文件到聊天…" opens the system
+ *   file picker and does the same check-and-copy.
+ * - Authorised folders: Settings holds an explicit allow list (added
+ *   one by one) and a block list (always wins). The shell never reads
+ *   outside the allow list. Recent files (paths only, max 10) can be
+ *   re-copied from Settings.
+ *
  * Safety notes:
  * - The web page runs sandboxed, with Node integration off and
  *   context isolation on. The preload script exposes nothing except
@@ -40,8 +54,9 @@
  */
 'use strict';
 
-const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dialog, screen, ipcMain, Notification, session } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dialog, screen, ipcMain, Notification, session, clipboard } = require('electron');
 const path = require('node:path');
+const { fileURLToPath } = require('node:url');
 const fs = require('node:fs');
 const config = require('./config');
 
@@ -242,6 +257,12 @@ function createWindow() {
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('file://')) {
+      // A file dropped on the page that the page did not handle.
+      event.preventDefault();
+      handleUnhandledDrop(url);
+      return;
+    }
     if (!isMuseUrl(url)) {
       event.preventDefault();
       openExternal(url);
@@ -359,6 +380,11 @@ function createQuickChatWindow() {
     return { action: 'deny' };
   });
   quickChatWindow.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('file://')) {
+      event.preventDefault();
+      handleUnhandledDrop(url);
+      return;
+    }
     if (!isMuseUrl(url)) {
       event.preventDefault();
       openExternal(url);
@@ -533,6 +559,135 @@ function createSettingsWindow() {
     settingsWindow = null;
   });
   return settingsWindow;
+}
+
+// --- Files: drag & drop, picker, clipboard hand-off (Phase 3) ---------
+// The shell can never inject a file into the web page's upload —
+// whether a drop is accepted is decided by muse.ai itself. What the
+// shell CAN guarantee: if the page does not handle a drop, the shell
+// checks the authorised-folders list and copies the file's content
+// (text files) or its path (binary / large files) to the clipboard,
+// so the user pastes it into the chat. Nothing is ever read outside
+// the authorised folders, and a blocked folder always wins.
+
+const MAX_TEXT_BYTES = 512 * 1024;
+const MAX_READ_BYTES = 5 * 1024 * 1024;
+
+// Paths from the most recent drop, recorded by preload.js. Only used
+// when the page did not handle the drop (see handleUnhandledDrop).
+let lastDrop = { paths: [], at: 0 };
+
+function recordRecentFile(filePath) {
+  const recent = config.get('recentFiles') || [];
+  const next = [filePath, ...recent.filter((p) => p !== filePath)].slice(0, 10);
+  config.update({ recentFiles: next });
+}
+
+/**
+ * Authorise one file and copy it to the clipboard for pasting into
+ * the chat. Returns { ok, mode: 'content'|'path', reason, name }.
+ */
+function sendFileToChat(filePath) {
+  const name = path.basename(String(filePath || ''));
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_) {
+    return { ok: false, reason: 'missing', name };
+  }
+  if (!stat.isFile()) return { ok: false, reason: 'not-a-file', name };
+  const check = config.authorizeFile(
+    filePath,
+    config.get('authorizedFolders'),
+    config.get('blockedFolders')
+  );
+  if (!check.ok) return { ok: false, reason: check.reason, name };
+  if (stat.size > MAX_READ_BYTES) {
+    clipboard.writeText(filePath);
+    recordRecentFile(filePath);
+    return { ok: true, mode: 'path', name };
+  }
+  let content;
+  try {
+    content = fs.readFileSync(filePath);
+  } catch (_) {
+    return { ok: false, reason: 'unreadable', name };
+  }
+  // Binary detection: a NUL byte in the first 8 KB, or too big for text.
+  const head = content.subarray(0, 8192);
+  if (head.includes(0) || stat.size > MAX_TEXT_BYTES) {
+    clipboard.writeText(filePath);
+    recordRecentFile(filePath);
+    return { ok: true, mode: 'path', name };
+  }
+  clipboard.writeText(content.toString('utf8'));
+  recordRecentFile(filePath);
+  return { ok: true, mode: 'content', name };
+}
+
+function handleFilesForChat(paths, source) {
+  const list = (Array.isArray(paths) ? paths : []).filter((p) => typeof p === 'string' && p);
+  if (list.length === 0) return;
+  const results = list.map((p) => sendFileToChat(p));
+  const sent = results.filter((r) => r.ok);
+  const denied = results.filter((r) => !r.ok);
+  const contentCount = sent.filter((r) => r.mode === 'content').length;
+  const pathCount = sent.filter((r) => r.mode === 'path').length;
+  if (sent.length > 0) {
+    const parts = [];
+    if (contentCount > 0) parts.push(`${contentCount} 个文件的内容已复制到剪贴板，粘贴进聊天即可发给 Edison`);
+    if (pathCount > 0) parts.push(`${pathCount} 个文件的路径已复制到剪贴板（文件是二进制或太大，只复制路径）`);
+    notify('文件已准备好', parts.join('；') + '。');
+  }
+  const authDenied = denied.filter((r) =>
+    r.reason === 'not-authorized' || r.reason === 'no-folders' || r.reason === 'blocked');
+  if (authDenied.length > 0) {
+    const first = authDenied[0];
+    const reasonText = first.reason === 'no-folders'
+      ? '还没有设置任何授权文件夹，壳子不会读取任何文件。'
+      : first.reason === 'blocked'
+        ? `“${first.name}”在黑名单文件夹里，壳子拒绝读取。`
+        : `“${first.name}”不在已授权文件夹里，壳子拒绝读取。`;
+    dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: '文件未发送',
+      message: `${authDenied.length} 个文件没有发送`,
+      detail: reasonText + '\n\n请在设置 → 文件与授权文件夹里添加包含这个文件的文件夹。',
+      buttons: ['打开设置', '知道了'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) createSettingsWindow();
+    }).catch(() => {});
+  } else if (denied.length > 0) {
+    notify('部分文件未发送', denied.map((r) => r.name).join('、') + ' 无法读取。');
+  }
+}
+
+/** A drop the web page did not handle arrives here as file:// navigation. */
+function handleUnhandledDrop(fileUrl) {
+  let paths = [];
+  if (Date.now() - lastDrop.at < 2000 && lastDrop.paths.length > 0) {
+    paths = lastDrop.paths;
+  }
+  if (paths.length === 0) {
+    try {
+      paths = [fileURLToPath(fileUrl)];
+    } catch (_) {
+      paths = [];
+    }
+  }
+  if (paths.length > 0) handleFilesForChat(paths, 'drop');
+}
+
+async function pickAndSendFiles() {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const { canceled, filePaths } = await dialog.showOpenDialog(parent, {
+    title: '选择要发给 Edison 的文件',
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (canceled || !filePaths || filePaths.length === 0) return;
+  handleFilesForChat(filePaths, 'picker');
 }
 
 // --- Auto-start -------------------------------------------------------
@@ -773,6 +928,7 @@ function buildMenu() {
       submenu: [
         { label: '重新加载', accelerator: 'CmdOrCtrl+R', click: () => mainWindow && mainWindow.reload() },
         { label: '回到首页', click: () => mainWindow && mainWindow.loadURL(MUSE_URL) },
+        { label: '发送文件到聊天…', accelerator: 'CmdOrCtrl+Shift+O', click: () => pickAndSendFiles() },
         { type: 'separator' },
         { label: quickChatLabel, click: () => toggleQuickChat() },
         {
@@ -861,6 +1017,7 @@ function buildTrayMenu() {
   const contextMenu = Menu.buildFromTemplate([
     { label: '显示 / 隐藏窗口', click: toggleWindow },
     { label: 'Quick chat', click: () => toggleQuickChat() },
+    { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
     {
@@ -1038,6 +1195,49 @@ ipcMain.handle('floating-toggle-main', () => {
   return true;
 });
 
+// File drop IPC. preload.js reports every drop on the web page; the
+// main process only acts on it when the page did not handle the drop
+// (a file:// navigation follows). Drops on the floating button never
+// reach the web page, so they are handled directly.
+ipcMain.on('dropped-files', (event, paths) => {
+  if (Array.isArray(paths)) {
+    lastDrop = { paths: paths.filter((p) => typeof p === 'string' && p), at: Date.now() };
+  }
+});
+ipcMain.on('floating-drop-files', (event, paths) => {
+  handleFilesForChat(paths, 'floating');
+});
+ipcMain.handle('select-folder', async () => {
+  const parent = settingsWindow && !settingsWindow.isDestroyed() ? settingsWindow : undefined;
+  const { canceled, filePaths } = await dialog.showOpenDialog(parent, {
+    title: '选择文件夹',
+    properties: ['openDirectory'],
+  });
+  if (canceled || !filePaths || filePaths.length === 0) return null;
+  return filePaths[0];
+});
+ipcMain.handle('copy-recent-file', (event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return { ok: false, reason: 'invalid' };
+  const result = sendFileToChat(filePath);
+  if (result.ok) {
+    notify(
+      '文件已准备好',
+      result.mode === 'content'
+        ? `“${result.name}”的内容已复制到剪贴板，粘贴进聊天即可。`
+        : `“${result.name}”的路径已复制到剪贴板。`
+    );
+  }
+  return result;
+});
+ipcMain.handle('clear-recent', () => {
+  config.update({ recentFiles: [] });
+  return true;
+});
+ipcMain.handle('send-files', async () => {
+  await pickAndSendFiles();
+  return true;
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -1048,4 +1248,6 @@ module.exports = {
   applyFloatingButton,
   registerShortcuts,
   notify,
+  sendFileToChat,
+  handleFilesForChat,
 };

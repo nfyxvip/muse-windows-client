@@ -40,6 +40,56 @@ function isValidAccelerator(value) {
   return NAMED_KEYS.has(key) || /^[A-Za-z0-9]$/.test(key) || /^F([1-9]|1\d|2[0-4])$/.test(key);
 }
 
+function sanitizeStringList(raw, max) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const value = item.trim();
+    if (!value) continue;
+    if (!out.includes(value)) out.push(value);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+// --- File access authorisation (Phase 3) ------------------------------
+// The shell only reads files the user explicitly authorised. A file
+// under a blocked folder is always denied, even if it is also under
+// an authorised folder. Comparisons are case-insensitive on Windows.
+
+function normalizeForCompare(p) {
+  let resolved = path.resolve(String(p || ''));
+  if (process.platform === 'win32') resolved = resolved.toLowerCase();
+  return resolved;
+}
+
+function isUnderDir(filePath, dirPath) {
+  const file = normalizeForCompare(filePath);
+  const dir = normalizeForCompare(dirPath);
+  return file === dir || file.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+}
+
+/**
+ * Check a file against the authorised/blocked folder lists.
+ * Returns { ok: true } or { ok: false, reason: 'not-authorized' |
+ * 'blocked' | 'no-folders' }.
+ */
+function authorizeFile(filePath, authorizedFolders, blockedFolders) {
+  const blocked = Array.isArray(blockedFolders) ? blockedFolders : [];
+  const authorized = Array.isArray(authorizedFolders) ? authorizedFolders : [];
+  if (blocked.some((d) => isUnderDir(filePath, d))) {
+    return { ok: false, reason: 'blocked' };
+  }
+  if (authorized.length === 0) {
+    return { ok: false, reason: 'no-folders' };
+  }
+  if (authorized.some((d) => isUnderDir(filePath, d))) {
+    return { ok: true };
+  }
+  return { ok: false, reason: 'not-authorized' };
+}
+
 function sanitizeBounds(raw, minWidth, minHeight) {
   if (!raw || typeof raw !== 'object') return null;
   const width = Number(raw.width);
@@ -77,6 +127,13 @@ const DEFAULTS = Object.freeze({
   floatingButtonBounds: null,
   // Master switch for notifications (web notifications + app toasts).
   notificationsEnabled: true,
+  // Folders the user explicitly authorised the shell to read from.
+  // Empty means the shell reads nothing (it always asks first).
+  authorizedFolders: [],
+  // Folders that are always denied, even under an authorised folder.
+  blockedFolders: [],
+  // Recently sent files (paths only, never content). Max 10.
+  recentFiles: [],
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -112,6 +169,9 @@ function sanitize(raw) {
     }
   }
   if (typeof raw.notificationsEnabled === 'boolean') out.notificationsEnabled = raw.notificationsEnabled;
+  out.authorizedFolders = sanitizeStringList(raw.authorizedFolders, 50);
+  out.blockedFolders = sanitizeStringList(raw.blockedFolders, 50);
+  out.recentFiles = sanitizeStringList(raw.recentFiles, 10);
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }
@@ -160,6 +220,8 @@ module.exports = {
   DEFAULTS,
   load,
   save,
+  authorizeFile,
+  isUnderDir,
   get(key) {
     return load()[key];
   },
