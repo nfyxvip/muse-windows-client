@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>听写 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; }
+  .wrap { padding: 18px 20px; display: flex; flex-direction: column; height: 100vh; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: #666; font-size: 12px; margin: 0 0 14px; line-height: 1.6; }
+  .mic-row { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+  #micBtn {
+    width: 64px; height: 64px; border-radius: 50%; border: none;
+    background: #111; color: #fff; font-size: 26px; cursor: pointer;
+    flex: 0 0 auto; box-shadow: 0 4px 14px rgba(0,0,0,.25);
+  }
+  #micBtn.listening { background: #b3261e; animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(179,38,30,.35); } 50% { box-shadow: 0 0 0 12px rgba(179,38,30,0); } }
+  #status { font-size: 13px; line-height: 1.6; color: #444; }
+  #status.err { color: #b3261e; }
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .controls label { font-size: 13px; color: #444; }
+  select { font-size: 13px; padding: 5px 6px; border: 1px solid #ccc; border-radius: 6px; background: #fff; font-family: inherit; }
+  #transcript {
+    flex: 1; min-height: 120px; background: #fff; border: 1px solid #e3e3e3;
+    border-radius: 8px; padding: 12px 14px; overflow-y: auto;
+    font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word;
+  }
+  #transcript .interim { color: #888; }
+  #transcript .empty { color: #aaa; }
+  .btns { display: flex; gap: 10px; margin-top: 12px; }
+  button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { color: #888; font-size: 12px; line-height: 1.6; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>听写</h1>
+  <p class="sub">对着麦克风说话，识别出的文字会显示在这里。识别结果不会自动打进别的软件，只会复制到剪贴板，由你粘贴进聊天。</p>
+
+  <div class="mic-row">
+    <button id="micBtn" type="button" title="开始 / 停止听写">🎙</button>
+    <div id="status">就绪。点一下麦克风开始听写。</div>
+  </div>
+
+  <div class="controls">
+    <label>语言
+      <select id="langSelect">
+        <option value="zh-CN">中文（普通话）</option>
+        <option value="en-US">English</option>
+      </select>
+    </label>
+    <label>方式
+      <select id="modeSelect">
+        <option value="click">点一下说话</option>
+        <option value="hold">按住说话</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="autoCopy"> 识别后自动复制</label>
+  </div>
+
+  <div id="transcript"><span class="empty">识别结果会显示在这里。</span></div>
+
+  <div class="btns">
+    <button id="copyBtn" type="button">复制全部</button>
+    <button id="clearBtn" type="button">清空</button>
+    <button id="closeBtn" type="button" class="primary">关闭</button>
+  </div>
+  <p class="hint">在线识别需要联网（走在线语音服务）。如果提示网络错误，请确认 VPN / 代理已开。按 Esc 可以收起本窗口。</p>
+</div>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  const transcriptEl = $('transcript');
+  const micBtn = $('micBtn');
+
+  let settings = { dictationLanguage: 'zh-CN', dictationMode: 'click', dictationAutoCopy: true };
+  let recognition = null;
+  let listening = false;
+  let wantListening = false;
+  let finalParts = [];
+  let interimText = '';
+
+  const setStatus = (msg, isErr) => {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle('err', !!isErr);
+  };
+
+  const fullText = () => finalParts.join('');
+
+  function render() {
+    if (!finalParts.length && !interimText) {
+      transcriptEl.innerHTML = '<span class="empty">识别结果会显示在这里。</span>';
+      return;
+    }
+    transcriptEl.textContent = '';
+    if (finalParts.length) {
+      transcriptEl.appendChild(document.createTextNode(fullText()));
+    }
+    if (interimText) {
+      const span = document.createElement('span');
+      span.className = 'interim';
+      span.textContent = interimText;
+      transcriptEl.appendChild(span);
+    }
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function speechRecognitionClass() {
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  }
+
+  function makeRecognition() {
+    const Klass = speechRecognitionClass();
+    if (!Klass) return null;
+    const rec = new Klass();
+    rec.lang = settings.dictationLanguage || 'zh-CN';
+    rec.interimResults = true;
+    rec.continuous = settings.dictationMode !== 'hold';
+    rec.maxAlternatives = 1;
+    rec.onresult = (event) => {
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        if (res.isFinal) {
+          finalParts.push(res[0].transcript);
+        } else {
+          interim += res[0].transcript;
+        }
+      }
+      interimText = interim;
+      render();
+      if (settings.dictationAutoCopy && fullText()) {
+        window.museDictation.copyText(fullText()).catch(() => {});
+        setStatus('正在听…识别结果已自动复制到剪贴板。');
+      } else {
+        setStatus('正在听…');
+      }
+    };
+    rec.onerror = (event) => {
+      const err = (event && event.error) || 'unknown';
+      wantListening = false;
+      listening = false;
+      micBtn.classList.remove('listening');
+      if (err === 'aborted') {
+        setStatus('已停止。');
+        return;
+      }
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        setStatus('麦克风权限被拒绝。请在 Windows 设置 → 隐私和安全性 → 麦克风里允许本应用，或在客户端设置里打开麦克风。', true);
+      } else if (err === 'network') {
+        setStatus('网络错误：在线语音识别需要联网，请确认 VPN / 代理已开，再点麦克风重试。', true);
+      } else if (err === 'no-speech') {
+        setStatus('没听到声音，请靠近一点麦克风再试一次。', true);
+      } else if (err === 'audio-capture') {
+        setStatus('找不到麦克风，请检查麦克风是否已连接并被 Windows 识别。', true);
+      } else {
+        setStatus('识别出错（' + err + '），请重试。', true);
+      }
+    };
+    rec.onend = () => {
+      listening = false;
+      micBtn.classList.remove('listening');
+      interimText = '';
+      render();
+      // Click mode keeps listening across pauses until the user stops it.
+      if (wantListening && settings.dictationMode === 'click') {
+        setTimeout(() => { if (wantListening) startListening(); }, 300);
+      } else if (!wantListening) {
+        setStatus(finalParts.length ? '已停止。识别结果在上方，点“复制全部”可再复制一次。' : '已停止。');
+      }
+    };
+    return rec;
+  }
+
+  function startListening() {
+    if (!speechRecognitionClass()) {
+      setStatus('当前环境不支持在线语音识别。', true);
+      return;
+    }
+    if (listening) return;
+    try {
+      recognition = makeRecognition();
+      recognition.start();
+      listening = true;
+      wantListening = true;
+      micBtn.classList.add('listening');
+      setStatus(settings.dictationMode === 'hold' ? '正在听…松开按钮停止。' : '正在听…再点一下麦克风停止。');
+    } catch (e) {
+      setStatus('启动识别失败：' + e.message, true);
+    }
+  }
+
+  function stopListening() {
+    wantListening = false;
+    if (recognition) {
+      try { recognition.stop(); } catch (_) { /* already stopped */ }
+    }
+    listening = false;
+    micBtn.classList.remove('listening');
+  }
+
+  micBtn.addEventListener('click', () => {
+    if (settings.dictationMode === 'hold') return; // hold mode uses press-and-hold below
+    if (listening) stopListening(); else startListening();
+  });
+  micBtn.addEventListener('mousedown', () => {
+    if (settings.dictationMode === 'hold') startListening();
+  });
+  micBtn.addEventListener('mouseup', () => {
+    if (settings.dictationMode === 'hold') stopListening();
+  });
+  micBtn.addEventListener('mouseleave', () => {
+    if (settings.dictationMode === 'hold' && listening) stopListening();
+  });
+
+  $('langSelect').addEventListener('change', async (e) => {
+    settings.dictationLanguage = e.target.value;
+    try { await window.museDictation.set({ dictationLanguage: settings.dictationLanguage }); } catch (_) {}
+    if (listening) { stopListening(); startListening(); }
+  });
+  $('modeSelect').addEventListener('change', async (e) => {
+    settings.dictationMode = e.target.value;
+    try { await window.museDictation.set({ dictationMode: settings.dictationMode }); } catch (_) {}
+    if (listening) stopListening();
+    setStatus(settings.dictationMode === 'hold' ? '已切换为“按住说话”：按住麦克风说话，松开停止。' : '已切换为“点一下说话”。');
+  });
+  $('autoCopy').addEventListener('change', async (e) => {
+    settings.dictationAutoCopy = e.target.checked;
+    try { await window.museDictation.set({ dictationAutoCopy: settings.dictationAutoCopy }); } catch (_) {}
+  });
+  $('copyBtn').addEventListener('click', async () => {
+    if (!fullText()) { setStatus('还没有识别结果。'); return; }
+    try {
+      await window.museDictation.copyText(fullText());
+      await window.museDictation.copiedToast();
+      setStatus('已复制到剪贴板，粘贴进聊天即可。');
+    } catch (e) { setStatus('复制失败：' + e.message, true); }
+  });
+  $('clearBtn').addEventListener('click', () => {
+    finalParts = [];
+    interimText = '';
+    render();
+    setStatus('已清空。');
+  });
+  $('closeBtn').addEventListener('click', () => {
+    stopListening();
+    window.museDictation.close();
+  });
+  // Stop listening when the window is hidden (e.g. Esc or shortcut).
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && listening) stopListening();
+  });
+
+  (async function load() {
+    try {
+      const s = await window.museDictation.get();
+      settings.dictationLanguage = s.dictationLanguage || 'zh-CN';
+      settings.dictationMode = s.dictationMode || 'click';
+      settings.dictationAutoCopy = s.dictationAutoCopy !== false;
+      $('langSelect').value = settings.dictationLanguage;
+      $('modeSelect').value = settings.dictationMode;
+      $('autoCopy').checked = settings.dictationAutoCopy;
+      if (!speechRecognitionClass()) {
+        setStatus('当前环境不支持在线语音识别（缺少 SpeechRecognition）。', true);
+        micBtn.disabled = true;
+      }
+    } catch (e) {
+      setStatus('读取设置失败：' + e.message, true);
+    }
+  })();
+})();
+</script>
+</body>
+</html>

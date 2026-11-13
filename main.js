@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.4.0).
+ * Muse Windows Client — a simple unofficial wrapper (v0.5.0).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -41,6 +41,15 @@
  *   outside the allow list. Recent files (paths only, max 10) can be
  *   re-copied from Settings.
  *
+ * Phase 4 (v0.5.0):
+ * - Dictation: a small window using the Web Speech API (online) to
+ *   recognise speech in Chinese or English. Recognised text is copied
+ *   to the clipboard (automatically, or with a button) for pasting
+ *   into the chat. No audio is stored, and nothing is typed into
+ *   other apps automatically — clipboard only, by design.
+ * - Microphone permission is gated by a setting, for both the web
+ *   page and the dictation window.
+ *
  * Safety notes:
  * - The web page runs sandboxed, with Node integration off and
  *   context isolation on. The preload script exposes nothing except
@@ -69,17 +78,21 @@ const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 860;
 const QUICK_CHAT_WIDTH = 480;
 const QUICK_CHAT_HEIGHT = 640;
+const DICTATION_WIDTH = 440;
+const DICTATION_HEIGHT = 560;
 const FLOATING_SIZE = 64;
 
 let mainWindow = null;
 let settingsWindow = null;
 let quickChatWindow = null;
+let dictationWindow = null;
 let floatingWindow = null;
 let tray = null;
 let isQuitting = false;
 // 'ok' | 'failed' | 'disabled' — one per global shortcut.
 let toggleShortcutStatus = 'disabled';
 let quickChatShortcutStatus = 'disabled';
+let dictationShortcutStatus = 'disabled';
 let updateCheckInFlight = false;
 
 // electron-updater is optional at runtime: if it cannot be loaded,
@@ -421,6 +434,105 @@ function toggleQuickChat() {
   }
 }
 
+// --- Dictation --------------------------------------------------------
+// A small local window using the Web Speech API (online) to recognise
+// speech. No audio is stored. Recognised text goes to the clipboard
+// (automatically, or with a button) for pasting into the chat —
+// nothing is typed into other apps automatically, by design.
+
+let saveDictationBoundsTimer = null;
+function saveDictationBounds() {
+  if (!dictationWindow || dictationWindow.isDestroyed() || dictationWindow.isMinimized()) return;
+  try {
+    if (dictationWindow.isMaximized() || dictationWindow.isFullScreen()) return;
+    config.update({ dictationBounds: dictationWindow.getBounds() });
+  } catch (err) {
+    console.warn('Could not save dictation bounds:', err.message);
+  }
+}
+function scheduleSaveDictationBounds() {
+  if (saveDictationBoundsTimer) clearTimeout(saveDictationBoundsTimer);
+  saveDictationBoundsTimer = setTimeout(saveDictationBounds, 500);
+}
+
+function initialDictationBounds() {
+  const saved = config.get('dictationBounds');
+  const fallback = { width: DICTATION_WIDTH, height: DICTATION_HEIGHT };
+  if (!saved) return fallback;
+  const displays = screen.getAllDisplays();
+  const onScreen = displays.some((d) => {
+    const a = d.workArea;
+    return saved.x >= a.x - 100 && saved.x < a.x + a.width &&
+      saved.y >= a.y - 100 && saved.y < a.y + a.height;
+  });
+  if (!onScreen) return fallback;
+  const primary = screen.getPrimaryDisplay().workArea;
+  return {
+    x: Math.max(primary.x, Math.min(saved.x, primary.x + primary.width - 200)),
+    y: Math.max(primary.y, Math.min(saved.y, primary.y + primary.height - 200)),
+    width: Math.min(Math.max(saved.width, 360), primary.width),
+    height: Math.min(Math.max(saved.height, 480), primary.height),
+  };
+}
+
+function createDictationWindow() {
+  if (dictationWindow && !dictationWindow.isDestroyed()) return dictationWindow;
+  const bounds = initialDictationBounds();
+  dictationWindow = new BrowserWindow({
+    ...bounds,
+    minWidth: 360,
+    minHeight: 480,
+    title: '听写 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'dictation-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  dictationWindow.setMenu(null);
+  dictationWindow.loadFile(path.join(__dirname, 'dictation.html'));
+  dictationWindow.once('ready-to-show', () => {
+    dictationWindow.show();
+    dictationWindow.focus();
+  });
+  // Esc hides the dictation window instead of closing it.
+  dictationWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'Escape' && input.type === 'keyDown') {
+      dictationWindow.hide();
+    }
+  });
+  dictationWindow.on('resize', scheduleSaveDictationBounds);
+  dictationWindow.on('move', scheduleSaveDictationBounds);
+  dictationWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      saveDictationBounds();
+      dictationWindow.hide();
+    }
+  });
+  dictationWindow.on('closed', () => {
+    dictationWindow = null;
+  });
+  return dictationWindow;
+}
+
+function toggleDictation() {
+  if (!config.get('dictationEnabled')) return;
+  if (!dictationWindow || dictationWindow.isDestroyed()) {
+    createDictationWindow();
+    return;
+  }
+  if (dictationWindow.isVisible()) {
+    dictationWindow.hide();
+  } else {
+    dictationWindow.show();
+    dictationWindow.focus();
+  }
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -726,23 +838,37 @@ function notify(title, body) {
 }
 
 /**
- * Web notifications (the Notification API used by muse.ai) go through
- * the session permission handler, so the master switch in Settings
- * really turns them off instead of only hiding the app's own toasts.
+ * Permission gates. Web notifications (the Notification API used by
+ * muse.ai) go through the session permission handler, so the master
+ * switch in Settings really turns them off instead of only hiding
+ * the app's own toasts. Microphone access ('media') is gated the
+ * same way for both the web page and the dictation window.
  */
-function wireNotificationPermission() {
+function wirePermissionHandlers() {
+  const handler = (webContents, permission, callback) => {
+    if (permission === 'notifications') {
+      callback(!!config.get('notificationsEnabled'));
+    } else if (permission === 'media') {
+      callback(!!config.get('microphoneEnabled'));
+    } else {
+      callback(true);
+    }
+  };
   try {
-    session.fromPartition('persist:muse').setPermissionRequestHandler(
-      (webContents, permission, callback) => {
-        if (permission === 'notifications') {
-          callback(!!config.get('notificationsEnabled'));
-        } else {
-          callback(true);
-        }
-      }
-    );
+    session.fromPartition('persist:muse').setPermissionRequestHandler(handler);
   } catch (err) {
-    console.warn('Could not wire notification permission handler:', err.message);
+    console.warn('Could not wire permission handler for muse session:', err.message);
+  }
+  try {
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+      if (permission === 'media') {
+        callback(!!config.get('microphoneEnabled'));
+      } else {
+        callback(true);
+      }
+    });
+  } catch (err) {
+    console.warn('Could not wire permission handler for default session:', err.message);
   }
 }
 
@@ -804,6 +930,16 @@ function registerShortcuts() {
     } else {
       quickChatShortcutStatus = 'failed';
       reportShortcutFailure('Quick chat', accelerator);
+    }
+  }
+
+  if (config.get('dictationEnabled')) {
+    const accelerator = config.get('dictationShortcut') || 'CommandOrControl+Alt+D';
+    if (registerOneShortcut(accelerator, toggleDictation)) {
+      dictationShortcutStatus = 'ok';
+    } else {
+      dictationShortcutStatus = 'failed';
+      reportShortcutFailure('听写', accelerator);
     }
   }
 
@@ -931,6 +1067,7 @@ function buildMenu() {
         { label: '发送文件到聊天…', accelerator: 'CmdOrCtrl+Shift+O', click: () => pickAndSendFiles() },
         { type: 'separator' },
         { label: quickChatLabel, click: () => toggleQuickChat() },
+        { label: `听写 (${describeShortcut(config.get('dictationShortcut'))})`, click: () => toggleDictation() },
         {
           label: '悬浮按钮',
           type: 'checkbox',
@@ -1014,9 +1151,14 @@ function buildTrayMenu() {
     quickChatShortcutStatus === 'failed'
       ? `Quick chat 快捷键 ${describeShortcut(config.get('quickChatShortcut'))}（注册失败）`
       : `Quick chat 快捷键 ${describeShortcut(config.get('quickChatShortcut'))}`;
+  const dictationLabel =
+    dictationShortcutStatus === 'failed'
+      ? `听写快捷键 ${describeShortcut(config.get('dictationShortcut'))}（注册失败）`
+      : `听写快捷键 ${describeShortcut(config.get('dictationShortcut'))}`;
   const contextMenu = Menu.buildFromTemplate([
     { label: '显示 / 隐藏窗口', click: toggleWindow },
     { label: 'Quick chat', click: () => toggleQuickChat() },
+    { label: '听写', click: () => toggleDictation() },
     { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
@@ -1046,6 +1188,16 @@ function buildTrayMenu() {
       checked: quickChatEnabled,
       click: (menuItem) => {
         config.update({ quickChatEnabled: menuItem.checked });
+        registerShortcuts();
+        buildTrayMenu();
+      },
+    },
+    {
+      label: dictationLabel,
+      type: 'checkbox',
+      checked: !!config.get('dictationEnabled'),
+      click: (menuItem) => {
+        config.update({ dictationEnabled: menuItem.checked });
         registerShortcuts();
         buildTrayMenu();
       },
@@ -1114,7 +1266,7 @@ if (!gotLock) {
     applyAutoStart();
 
     wireAutoUpdater();
-    wireNotificationPermission();
+    wirePermissionHandlers();
     buildMenu();
     createWindow();
     buildTray();
@@ -1141,6 +1293,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   saveWindowBounds();
   saveQuickChatBounds();
+  saveDictationBounds();
   saveFloatingBounds();
 });
 
@@ -1154,7 +1307,7 @@ app.on('window-all-closed', (event) => {
 ipcMain.handle('settings-get', () => ({
   ...config.load(),
   version: app.getVersion(),
-  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus },
+  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus },
 }));
 ipcMain.handle('settings-set', (event, partial) => {
   const next = config.update(partial || {});
@@ -1164,7 +1317,9 @@ ipcMain.handle('settings-set', (event, partial) => {
     Object.prototype.hasOwnProperty.call(p, 'shortcutEnabled') ||
     Object.prototype.hasOwnProperty.call(p, 'toggleShortcut') ||
     Object.prototype.hasOwnProperty.call(p, 'quickChatEnabled') ||
-    Object.prototype.hasOwnProperty.call(p, 'quickChatShortcut')
+    Object.prototype.hasOwnProperty.call(p, 'quickChatShortcut') ||
+    Object.prototype.hasOwnProperty.call(p, 'dictationEnabled') ||
+    Object.prototype.hasOwnProperty.call(p, 'dictationShortcut')
   ) {
     registerShortcuts();
   }
@@ -1174,7 +1329,7 @@ ipcMain.handle('settings-set', (event, partial) => {
   buildMenu();
   return {
     ...next,
-    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus },
+    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus },
   };
 });
 ipcMain.handle('check-updates', () => {
@@ -1238,11 +1393,27 @@ ipcMain.handle('send-files', async () => {
   return true;
 });
 
+// Dictation window IPC (used by dictation-preload.js).
+ipcMain.handle('dictation-copy', (event, text) => {
+  if (typeof text !== 'string' || !text) return false;
+  clipboard.writeText(text);
+  return true;
+});
+ipcMain.handle('dictation-copied-toast', (event, text) => {
+  notify('听写', '识别结果已复制到剪贴板，粘贴进聊天即可。');
+  return true;
+});
+ipcMain.on('dictation-close', () => {
+  if (dictationWindow && !dictationWindow.isDestroyed()) dictationWindow.hide();
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
   createQuickChatWindow,
   toggleQuickChat,
+  createDictationWindow,
+  toggleDictation,
   createFloatingWindow,
   destroyFloatingWindow,
   applyFloatingButton,

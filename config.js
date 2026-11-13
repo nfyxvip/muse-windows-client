@@ -134,6 +134,21 @@ const DEFAULTS = Object.freeze({
   blockedFolders: [],
   // Recently sent files (paths only, never content). Max 10.
   recentFiles: [],
+  // Dictation (Phase 4): online speech recognition in a small window.
+  // No audio is stored; recognised text is copied to the clipboard.
+  dictationEnabled: true,
+  // Accelerator that toggles the dictation window.
+  dictationShortcut: 'CommandOrControl+Alt+D',
+  // Recognition language: 'zh-CN' | 'en-US'.
+  dictationLanguage: 'zh-CN',
+  // 'click' = click to start/stop, 'hold' = hold the button to talk.
+  dictationMode: 'click',
+  // Copy recognised text to the clipboard automatically.
+  dictationAutoCopy: true,
+  // Last dictation window bounds { x, y, width, height } or null.
+  dictationBounds: null,
+  // Allow the web page and dictation to use the microphone.
+  microphoneEnabled: true,
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -172,6 +187,18 @@ function sanitize(raw) {
   out.authorizedFolders = sanitizeStringList(raw.authorizedFolders, 50);
   out.blockedFolders = sanitizeStringList(raw.blockedFolders, 50);
   out.recentFiles = sanitizeStringList(raw.recentFiles, 10);
+  if (typeof raw.dictationEnabled === 'boolean') out.dictationEnabled = raw.dictationEnabled;
+  if (isValidAccelerator(raw.dictationShortcut)) out.dictationShortcut = raw.dictationShortcut;
+  if (raw.dictationLanguage === 'zh-CN' || raw.dictationLanguage === 'en-US') {
+    out.dictationLanguage = raw.dictationLanguage;
+  }
+  if (raw.dictationMode === 'click' || raw.dictationMode === 'hold') {
+    out.dictationMode = raw.dictationMode;
+  }
+  if (typeof raw.dictationAutoCopy === 'boolean') out.dictationAutoCopy = raw.dictationAutoCopy;
+  const db = sanitizeBounds(raw.dictationBounds, 360, 480);
+  if (db) out.dictationBounds = db;
+  if (typeof raw.microphoneEnabled === 'boolean') out.microphoneEnabled = raw.microphoneEnabled;
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }
