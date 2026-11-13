@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>框选区域 — Muse</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: rgba(0,0,0,0.35); cursor: crosshair; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .hint {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.75); color: #fff; padding: 8px 16px;
+    border-radius: 6px; font-size: 13px; pointer-events: none; white-space: nowrap;
+  }
+  #sel {
+    position: fixed; display: none;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.3);
+    background: rgba(255,255,255,0.06);
+  }
+  #label {
+    position: fixed; display: none;
+    background: #111; color: #fff; font-size: 13px; padding: 4px 8px;
+    border-radius: 4px; pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="hint">拖拽框选要截取的区域，松开确认；按 Esc 取消</div>
+<div id="sel"></div>
+<div id="label"></div>
+<script>
+(function () {
+  const sel = document.getElementById('sel');
+  const label = document.getElementById('label');
+  let start = null;
+
+  function rectFrom(a, b) {
+    return {
+      x: Math.min(a.x, b.x),
+      y: Math.min(a.y, b.y),
+      width: Math.abs(b.x - a.x),
+      height: Math.abs(b.y - a.y),
+    };
+  }
+
+  function draw(r) {
+    sel.style.display = 'block';
+    sel.style.left = r.x + 'px';
+    sel.style.top = r.y + 'px';
+    sel.style.width = r.width + 'px';
+    sel.style.height = r.height + 'px';
+    label.style.display = 'block';
+    label.textContent = r.width + ' × ' + r.height;
+    label.style.left = (r.x + r.width + 8) + 'px';
+    label.style.top = (r.y + r.height + 8) + 'px';
+  }
+
+  function hide() {
+    sel.style.display = 'none';
+    label.style.display = 'none';
+  }
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    start = { x: e.clientX, y: e.clientY };
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!start) return;
+    draw(rectFrom(start, { x: e.clientX, y: e.clientY }));
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (!start) return;
+    const r = rectFrom(start, { x: e.clientX, y: e.clientY });
+    start = null;
+    if (r.width >= 4 && r.height >= 4) {
+      window.museRegion.selectRect(r);
+    } else {
+      hide();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') window.museRegion.cancel();
+  });
+})();
+</script>
+</body>
+</html>

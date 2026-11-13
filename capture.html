@@ -23,6 +23,8 @@
   button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
   button.primary { background: #111; color: #fff; border-color: #111; }
   button:disabled { opacity: .5; cursor: default; }
+  .region-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; font-size: 13px; }
+  .region-row input { width: 72px; padding: 5px 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -30,11 +32,20 @@
   <h1>截屏</h1>
   <p class="sub">选一个屏幕或窗口截取。截图只会显示在这里，不会自动上传；点“复制到剪贴板”后粘贴进聊天，就能发给 Edison。</p>
   <div id="status">正在列出屏幕和窗口…</div>
+  <div class="btns" style="margin:0 0 12px"><button id="regionBtn" type="button">框选区域…</button></div>
 
   <div id="picker"><div class="grid" id="grid"></div></div>
 
   <div id="preview">
     <img id="shot" alt="截图预览">
+    <div class="region-row">
+      <span>区域（像素）：</span>
+      <label>X <input type="number" id="cropX" min="0"></label>
+      <label>Y <input type="number" id="cropY" min="0"></label>
+      <label>宽 <input type="number" id="cropW" min="1"></label>
+      <label>高 <input type="number" id="cropH" min="1"></label>
+      <button id="recropBtn" type="button">应用</button>
+    </div>
     <div class="btns">
       <button id="copyBtn" type="button" class="primary">复制到剪贴板</button>
       <button id="saveBtn" type="button">保存为文件…</button>
@@ -105,15 +116,33 @@
         setStatus('截取失败，请重试。', true);
         return;
       }
-      current = shot;
-      $('shot').src = shot.dataUrl;
-      $('picker').style.display = 'none';
-      $('preview').style.display = 'block';
-      setStatus('已截取“' + shot.name + '”（' + shot.width + '×' + shot.height + '）。');
+      showShot(shot, '已截取“' + shot.name + '”（' + shot.width + '×' + shot.height + '）。');
     } catch (e) {
       setStatus('截取失败：' + e.message, true);
     }
   }
+
+  function showShot(shot, msg) {
+    current = shot;
+    $('shot').src = shot.dataUrl;
+    if (shot.rect) {
+      $('cropX').value = shot.rect.x;
+      $('cropY').value = shot.rect.y;
+      $('cropW').value = shot.rect.width;
+      $('cropH').value = shot.rect.height;
+    }
+    $('picker').style.display = 'none';
+    $('preview').style.display = 'block';
+    setStatus(msg || ('已截取（' + shot.width + '×' + shot.height + '）。'));
+  }
+
+  window.museCapture.onRegionShot((shot) => {
+    if (shot && shot.dataUrl) {
+      showShot(shot, '已截取区域（' + shot.width + '×' + shot.height + '）。改下面的数字可以精确调整。');
+    } else {
+      setStatus('区域截取失败，请重试。', true);
+    }
+  });
 
   $('copyBtn').addEventListener('click', async () => {
     if (!current) return;
@@ -132,6 +161,26 @@
   });
   $('againBtn').addEventListener('click', () => { current = null; listSources(); });
   $('closeBtn').addEventListener('click', () => window.museCapture.close());
+  $('regionBtn').addEventListener('click', async () => {
+    setStatus('在屏幕上拖拽框选区域，松开确认；按 Esc 取消。');
+    try { await window.museCapture.startRegion(); } catch (e) { setStatus('打开框选失败：' + e.message, true); }
+  });
+  $('recropBtn').addEventListener('click', async () => {
+    const rect = {
+      x: parseInt($('cropX').value, 10) || 0,
+      y: parseInt($('cropY').value, 10) || 0,
+      width: parseInt($('cropW').value, 10) || 0,
+      height: parseInt($('cropH').value, 10) || 0,
+    };
+    try {
+      const shot = await window.museCapture.recrop(rect);
+      if (!shot || !shot.dataUrl) {
+        setStatus('裁剪失败：区域无效，请检查数字。', true);
+        return;
+      }
+      showShot(shot, '已按指定区域裁剪（' + shot.width + '×' + shot.height + '）。');
+    } catch (e) { setStatus('裁剪失败：' + e.message, true); }
+  });
 
   listSources();
 })();

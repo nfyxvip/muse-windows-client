@@ -62,6 +62,11 @@
  *   recording. All three permissions default OFF and ask for
  *   confirmation on first use.
  *
+ * v0.6.1 adds region screenshot to Phase 5: drag a rectangle on the
+ * screen to capture just that region (DPI-aware cropping), plus
+ * exact X / Y / width / height inputs in the preview to re-crop
+ * the last capture to a precise size.
+ *
  * Safety notes:
  * - The web page runs sandboxed, with Node integration off and
  *   context isolation on. The preload script exposes nothing except
@@ -100,6 +105,8 @@ let quickChatWindow = null;
 let dictationWindow = null;
 let captureWindow = null;
 let cameraWindow = null;
+let regionWindow = null;
+let lastFullCapture = null; // { image: nativeImage, rect: {x,y,width,height} in image pixels }
 let floatingWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -673,12 +680,141 @@ async function captureSource(sourceId) {
   });
   const source = sources.find((s) => s.id === sourceId);
   if (!source) return null;
+  const thumb = source.thumbnail;
+  const size = thumb.getSize();
+  lastFullCapture = { image: thumb, rect: { x: 0, y: 0, width: size.width, height: size.height } };
   return {
     id: source.id,
     name: source.name,
-    dataUrl: source.thumbnail.toDataURL(),
-    width: source.thumbnail.getSize().width,
-    height: source.thumbnail.getSize().height,
+    dataUrl: thumb.toDataURL(),
+    width: size.width,
+    height: size.height,
+    rect: { x: 0, y: 0, width: size.width, height: size.height },
+    fullWidth: size.width,
+    fullHeight: size.height,
+  };
+}
+
+/** Clamp a crop rect to an image; returns null when nothing is left. */
+function clampRectToImage(rect, size) {
+  if (!rect || !size) return null;
+  const x = Math.max(0, Math.min(Math.round(rect.x || 0), size.width - 1));
+  const y = Math.max(0, Math.min(Math.round(rect.y || 0), size.height - 1));
+  const width = Math.max(0, Math.min(Math.round(rect.width || 0), size.width - x));
+  const height = Math.max(0, Math.min(Math.round(rect.height || 0), size.height - y));
+  if (width < 1 || height < 1) return null;
+  return { x, y, width, height };
+}
+
+/** Re-crop the last full capture to an exact rect (image pixels). */
+function recropCapture(rect) {
+  if (!lastFullCapture) return null;
+  const fullSize = lastFullCapture.image.getSize();
+  const clamped = clampRectToImage(rect, fullSize);
+  if (!clamped) return null;
+  lastFullCapture.rect = clamped;
+  const cropped = lastFullCapture.image.crop(clamped);
+  return {
+    dataUrl: cropped.toDataURL(),
+    width: clamped.width,
+    height: clamped.height,
+    rect: clamped,
+    fullWidth: fullSize.width,
+    fullHeight: fullSize.height,
+  };
+}
+
+// --- Region screenshot ------------------------------------------------
+// Drag a rectangle on the screen; the overlay reports DIP coordinates
+// and the crop is converted to physical pixels with the display's
+// scale factor, so the result is exact on HiDPI screens too.
+
+function createRegionWindow() {
+  if (regionWindow && !regionWindow.isDestroyed()) {
+    regionWindow.focus();
+    return regionWindow;
+  }
+  const display = screen.getPrimaryDisplay();
+  regionWindow = new BrowserWindow({
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    title: '框选区域 — Muse',
+    webPreferences: {
+      preload: path.join(__dirname, 'region-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  regionWindow.setMenu(null);
+  regionWindow.loadFile(path.join(__dirname, 'region.html'));
+  regionWindow.once('ready-to-show', () => {
+    regionWindow.show();
+    regionWindow.focus();
+  });
+  regionWindow.on('closed', () => {
+    regionWindow = null;
+  });
+  return regionWindow;
+}
+
+async function startRegionCapture() {
+  if (!config.get('screenshotEnabled')) {
+    permissionOffNotice('screenshot', '截屏');
+    return;
+  }
+  if (!(await confirmPermissionOnce('screenshot'))) return;
+  createRegionWindow();
+}
+
+/** Capture a region given in DIP coordinates on the primary display. */
+async function captureRegion(rectDip) {
+  if (!rectDip || (rectDip.width || 0) < 1 || (rectDip.height || 0) < 1) return null;
+  const display = screen.getPrimaryDisplay();
+  const scale = display.scaleFactor || 1;
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: {
+      width: Math.min(Math.round(display.size.width * scale), 3840),
+      height: Math.min(Math.round(display.size.height * scale), 2160),
+    },
+    fetchWindowIcons: false,
+  });
+  let source = sources.find((s) => String(s.display_id) === String(display.id));
+  if (!source) source = sources[0];
+  if (!source) return null;
+  const full = source.thumbnail;
+  const fullSize = full.getSize();
+  const rectPx = clampRectToImage({
+    x: Math.round(rectDip.x * scale),
+    y: Math.round(rectDip.y * scale),
+    width: Math.round(rectDip.width * scale),
+    height: Math.round(rectDip.height * scale),
+  }, fullSize);
+  if (!rectPx) return null;
+  lastFullCapture = { image: full, rect: rectPx };
+  const cropped = full.crop(rectPx);
+  return {
+    dataUrl: cropped.toDataURL(),
+    name: `区域 ${rectPx.width}×${rectPx.height}`,
+    width: rectPx.width,
+    height: rectPx.height,
+    rect: rectPx,
+    fullWidth: fullSize.width,
+    fullHeight: fullSize.height,
   };
 }
 
@@ -1732,6 +1868,35 @@ ipcMain.handle('capture-take', async (event, sourceId) => {
     return null;
   }
 });
+ipcMain.handle('region-start', async () => {
+  await startRegionCapture();
+  return true;
+});
+ipcMain.on('region-selected', async (event, rect) => {
+  if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
+  try {
+    const shot = await captureRegion(rect);
+    if (shot && captureWindow && !captureWindow.isDestroyed()) {
+      captureWindow.webContents.send('region-shot', shot);
+      captureWindow.focus();
+    } else if (!shot) {
+      notify('截屏', '区域截取失败，请重试。');
+    }
+  } catch (err) {
+    console.warn('Could not capture region:', err.message);
+  }
+});
+ipcMain.on('region-cancel', () => {
+  if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
+});
+ipcMain.handle('capture-recrop', async (event, rect) => {
+  try {
+    return recropCapture(rect);
+  } catch (err) {
+    console.warn('Could not recrop:', err.message);
+    return null;
+  }
+});
 ipcMain.handle('image-copy', (event, dataUrl) => {
   try {
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return false;
@@ -1780,6 +1945,9 @@ module.exports = {
   toggleDictation,
   createCaptureWindow,
   createCameraWindow,
+  createRegionWindow,
+  captureRegion,
+  recropCapture,
   listCaptureSources,
   captureSource,
   canAutomate,
