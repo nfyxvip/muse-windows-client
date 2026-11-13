@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld('museSettings', {
   get: () => ipcRenderer.invoke('settings-get'),
   set: (partial) => ipcRenderer.invoke('settings-set', partial),
   checkForUpdates: () => ipcRenderer.invoke('check-updates'),
+  testNotification: () => ipcRenderer.invoke('test-notification'),
   close: () => ipcRenderer.send('settings-close'),
 });

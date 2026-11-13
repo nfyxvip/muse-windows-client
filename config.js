@@ -14,13 +14,69 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { app } = require('electron');
 
+const MODIFIERS = new Set([
+  'Command', 'Cmd', 'Control', 'Ctrl', 'CommandOrControl', 'CmdOrCtrl',
+  'Alt', 'Option', 'AltGr', 'Shift', 'Super', 'Meta',
+]);
+const NAMED_KEYS = new Set([
+  'Space', 'Tab', 'Enter', 'Return', 'Escape', 'Esc', 'Backspace',
+  'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown',
+  'Up', 'Down', 'Left', 'Right', 'Plus', 'Minus',
+]);
+
+/**
+ * Validate an Electron accelerator string: at least one modifier plus
+ * one key. Anything invalid falls back to the default, so a bad value
+ * in the config file can never break shortcut registration.
+ */
+function isValidAccelerator(value) {
+  if (typeof value !== 'string') return false;
+  const parts = value.split('+').map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2) return false;
+  const key = parts[parts.length - 1];
+  const mods = parts.slice(0, -1);
+  if (!mods.every((m) => MODIFIERS.has(m))) return false;
+  if (MODIFIERS.has(key)) return false;
+  return NAMED_KEYS.has(key) || /^[A-Za-z0-9]$/.test(key) || /^F([1-9]|1\d|2[0-4])$/.test(key);
+}
+
+function sanitizeBounds(raw, minWidth, minHeight) {
+  if (!raw || typeof raw !== 'object') return null;
+  const width = Number(raw.width);
+  const height = Number(raw.height);
+  const x = Number(raw.x);
+  const y = Number(raw.y);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (width < minWidth || height < minHeight) return null;
+  return {
+    x: Number.isFinite(x) ? Math.round(x) : 0,
+    y: Number.isFinite(y) ? Math.round(y) : 0,
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
 const DEFAULTS = Object.freeze({
   // Launch at Windows login. Default off.
   autoStart: false,
   // 'minimize-to-tray' | 'quit'
   closeBehaviour: 'minimize-to-tray',
-  // Global shortcut Ctrl+Alt+M enabled?
+  // Global shortcut (show/hide main window) enabled?
   shortcutEnabled: true,
+  // Accelerator for show/hide main window. Customisable in Settings.
+  toggleShortcut: 'CommandOrControl+Alt+M',
+  // Quick chat mini window enabled? Default on.
+  quickChatEnabled: true,
+  // Accelerator that toggles the Quick chat window.
+  quickChatShortcut: 'CommandOrControl+Alt+Q',
+  // Last Quick chat window bounds { x, y, width, height } or null.
+  quickChatBounds: null,
+  // Floating button (small always-on-top window). Default off.
+  floatingButtonEnabled: false,
+  // Last floating button position { x, y } or null.
+  floatingButtonBounds: null,
+  // Master switch for notifications (web notifications + app toasts).
+  notificationsEnabled: true,
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -42,27 +98,28 @@ function sanitize(raw) {
     out.closeBehaviour = raw.closeBehaviour;
   }
   if (typeof raw.shortcutEnabled === 'boolean') out.shortcutEnabled = raw.shortcutEnabled;
+  if (isValidAccelerator(raw.toggleShortcut)) out.toggleShortcut = raw.toggleShortcut;
+  if (typeof raw.quickChatEnabled === 'boolean') out.quickChatEnabled = raw.quickChatEnabled;
+  if (isValidAccelerator(raw.quickChatShortcut)) out.quickChatShortcut = raw.quickChatShortcut;
+  const qcb = sanitizeBounds(raw.quickChatBounds, 360, 480);
+  if (qcb) out.quickChatBounds = qcb;
+  if (typeof raw.floatingButtonEnabled === 'boolean') out.floatingButtonEnabled = raw.floatingButtonEnabled;
+  if (raw.floatingButtonBounds && typeof raw.floatingButtonBounds === 'object') {
+    const fx = Number(raw.floatingButtonBounds.x);
+    const fy = Number(raw.floatingButtonBounds.y);
+    if (Number.isFinite(fx) && Number.isFinite(fy)) {
+      out.floatingButtonBounds = { x: Math.round(fx), y: Math.round(fy) };
+    }
+  }
+  if (typeof raw.notificationsEnabled === 'boolean') out.notificationsEnabled = raw.notificationsEnabled;
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }
   if (typeof raw.checkUpdatesOnStartup === 'boolean') {
     out.checkUpdatesOnStartup = raw.checkUpdatesOnStartup;
   }
-  if (raw.windowBounds && typeof raw.windowBounds === 'object') {
-    const b = raw.windowBounds;
-    const width = Number(b.width);
-    const height = Number(b.height);
-    const x = Number(b.x);
-    const y = Number(b.y);
-    if (Number.isFinite(width) && Number.isFinite(height) && width >= 600 && height >= 400) {
-      out.windowBounds = {
-        x: Number.isFinite(x) ? Math.round(x) : 0,
-        y: Number.isFinite(y) ? Math.round(y) : 0,
-        width: Math.round(width),
-        height: Math.round(height),
-      };
-    }
-  }
+  const wb = sanitizeBounds(raw.windowBounds, 600, 400);
+  if (wb) out.windowBounds = wb;
   return out;
 }
 

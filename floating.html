@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  /* The whole circle is the drag handle; a click still toggles the main window. */
+  #btn {
+    width: 56px; height: 56px; margin: 4px;
+    border-radius: 50%;
+    background: #111;
+    color: #fff;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 26px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-app-region: drag;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    user-select: none;
+  }
+  #btn:hover { background: #222; }
+  #btn:active { transform: scale(0.96); }
+</style>
+</head>
+<body>
+<div id="btn" title="Muse — 点一下显示 / 隐藏主窗口，右键有更多选项">M</div>
+<script>
+(function () {
+  var downAt = 0;
+  var btn = document.getElementById('btn');
+  // -webkit-app-region: drag makes the OS treat mouse-down as a drag
+  // start; a plain click (down + up without moving) still fires click.
+  btn.addEventListener('mousedown', function () { downAt = Date.now(); });
+  btn.addEventListener('click', function () {
+    if (window.museFloating) window.museFloating.toggleMain();
+  });
+  btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+})();
+</script>
+</body>
+</html>

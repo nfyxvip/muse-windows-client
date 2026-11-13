@@ -4,7 +4,7 @@
 > 本文档只是分析（Phase 0），不做新功能开发。
 > 前提要先说清楚：**当前 Windows 客户端只是一个 Electron 壳子，打开的是网页版 muse.ai；它没有官方后端接口。** Mac 客户端很多能力是“官方客户端 + Muse 后端 + 系统配对”三方配合才能实现的，单靠一个本地壳子复制不了。这一点下面每一项都会如实标注，不夸大。
 
-- 现有版本：v0.2.0（Electron 38，electron-builder 26，electron-updater 6.8.11；Phase 1 已于 2026-11-13 完成，见第 4 节）
+- 现有版本：v0.3.0（Electron 38，electron-builder 26，electron-updater 6.8.11；Phase 1 已于 2026-11-13 完成，Phase 2 已于 2026-11-13 完成，见第 4 节）
 - 现有文件：`main.js`、`preload.js`、`package.json`、`build/icon.png` / `icon.ico`、`README.md`
 - Mac 功能依据：`~/docs/client-surfaces.md`（Mac app 一节）、`~/docs/devices/mac_app.md`
 - 目标系统：Windows 10 / 11（64 位）
@@ -221,6 +221,11 @@
   - 完整的设置页：外观（窗口大小记忆、缩放）、启动（开机自启动、启动时最小化到托盘）、托盘（关闭时行为）、快捷键、通知、检查更新、关于。
 - **需要 mingzhen 做的事：** 在 Windows 上试 Quick chat 和悬浮按钮，确认快捷键有没有和别的软件冲突、悬浮按钮会不会挡事、通知弹不弹。
 - **风险：** Quick chat 的网页版没有精简入口，只能复用完整 muse.ai 页面，小窗口里会显得挤；悬浮按钮是自制置顶窗口，全屏游戏 / 视频时可能被盖住或挡住别人，要留一键关闭。
+
+**Phase 2 完成情况（2026-11-13，v0.3.0）：代码部分已完成，Windows 实测部分待 mingzhen 在真机上做。**
+- 已做：Quick chat 小窗口（480×640，同一 `persist:muse` 登录分区，Esc 收起，位置 / 大小记忆，关闭只隐藏）；悬浮按钮（64×64 无边框置顶圆钮，可拖动，点一下显示 / 隐藏主窗口，右键菜单可打开 Quick chat 或隐藏，默认关闭，位置记忆）；快捷键自定义（设置页里可改主窗口和 Quick chat 的快捷键，默认 Ctrl+Alt+M / Ctrl+Alt+Q，格式校验，无效值自动恢复，注册失败时托盘气泡 + 设置页红色提示 + 托盘菜单标注）；通知总开关（设置页，控制 muse.ai 网页通知权限 + 应用自己的 Toast，含“发送测试通知”按钮）；设置页扩展（快捷键、Quick chat、悬浮按钮、通知四个新区）；托盘菜单和文件菜单新增 Quick chat / 悬浮按钮入口；版本号升到 0.3.0；README、CHANGELOG 已更新。
+- Linux 虚拟机上已验证：`node --check` 全部通过；Electron 实跑冒烟测试 18/18 通过（新设置默认值、快捷键格式校验、Quick chat 创建 / 显示 / 隐藏、悬浮按钮创建 / 显示 / 64×64 尺寸 / 销毁、通知不抛错、快捷键注册）。
+- 待 mingzhen 在 Windows 10 / 11 真机上做：试 Quick chat（快捷键有没有冲突、小窗口里页面挤不挤）、悬浮按钮（拖动、点击、右键、会不会挡事）、改一次快捷键、通知开关和测试通知。
 
 ### Phase 3 — 文件拖放与本地文件访问（带权限）
 

@@ -13,7 +13,11 @@
   section h2 { font-size: 14px; margin: 0 0 10px; }
   label.row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; cursor: pointer; }
   label.row input { margin-top: 2px; }
+  .field { display: flex; align-items: center; gap: 8px; padding: 6px 0 6px 26px; }
+  .field span { flex: 0 0 auto; color: #444; }
+  .field input[type="text"] { flex: 1; min-width: 0; font-size: 14px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
   .hint { color: #666; font-size: 12px; line-height: 1.6; margin: 4px 0 0 26px; }
+  .warn { color: #b3261e; font-size: 12px; line-height: 1.6; margin: 4px 0 0 26px; }
   .btns { display: flex; gap: 10px; margin-top: 6px; }
   button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
   button.primary { background: #111; color: #fff; border-color: #111; }
@@ -36,8 +40,31 @@
 
   <section>
     <h2>快捷键</h2>
-    <label class="row"><input type="checkbox" id="shortcutEnabled"> 启用全局快捷键 Ctrl+Alt+M（显示 / 隐藏窗口）</label>
-    <p class="hint" id="shortcutHint">如果这个快捷键被别的软件占用了，注册会失败，主窗口仍可正常使用。</p>
+    <label class="row"><input type="checkbox" id="shortcutEnabled"> 启用主窗口快捷键（显示 / 隐藏主窗口）</label>
+    <div class="field"><span>主窗口：</span><input type="text" id="toggleShortcut" spellcheck="false"></div>
+    <label class="row"><input type="checkbox" id="quickChatEnabled"> 启用 Quick chat 快捷键（弹出 / 收起小窗口）</label>
+    <div class="field"><span>Quick chat：</span><input type="text" id="quickChatShortcut" spellcheck="false"></div>
+    <p class="hint">格式例如 Ctrl+Alt+M、Ctrl+Alt+Q、Ctrl+Shift+K。至少要一个修饰键（Ctrl / Alt / Shift）加一个按键。改完立刻生效。</p>
+    <p class="warn" id="shortcutWarn" style="display:none"></p>
+  </section>
+
+  <section>
+    <h2>Quick chat</h2>
+    <p class="hint" style="margin-left:0">Quick chat 是一个小聊天窗口，和主窗口用同一个登录状态，不用重新登录。按快捷键弹出，再按一次收起；按 Esc 也可以收起。窗口大小和位置会被记住。</p>
+    <p class="hint" style="margin-left:0">注意：网页版没有精简入口，小窗口里显示的是完整 muse.ai 页面，内容会比较挤。</p>
+  </section>
+
+  <section>
+    <h2>悬浮按钮</h2>
+    <label class="row"><input type="checkbox" id="floatingButtonEnabled"> 显示悬浮按钮</label>
+    <p class="hint">一个可以拖动的小圆按钮，一直置顶显示。点一下显示 / 隐藏主窗口，右键可以打开 Quick chat 或隐藏它。默认关闭，全屏游戏或看视频时建议关掉。</p>
+  </section>
+
+  <section>
+    <h2>通知</h2>
+    <label class="row"><input type="checkbox" id="notificationsEnabled"> 允许通知（网页消息提醒 + 应用自己的提示）</label>
+    <div class="btns"><button id="testNotifBtn" type="button">发送一条测试通知</button></div>
+    <p class="hint">关掉后，muse.ai 网页的消息提醒也不会弹出来。</p>
   </section>
 
   <section>
@@ -50,7 +77,7 @@
     <h2>更新</h2>
     <label class="row"><input type="checkbox" id="checkUpdatesOnStartup"> 启动后自动检查更新（只检查，有新版本时才提示）</label>
     <div class="btns"><button id="checkBtn" type="button">检查更新</button></div>
-    <p class="hint">更新只检查 + 提示，不会静默下载或安装。更新包来自 GitHub Releases，需要先配置好更新仓库（见 README）。</p>
+    <p class="hint">更新只检查 + 提示，不会静默下载或安装。更新包来自 GitHub Releases（nfyxvip/muse-windows-client）。</p>
   </section>
 
   <div class="btns"><button class="primary" id="closeBtn" type="button">完成</button></div>
@@ -62,15 +89,36 @@
   const $ = (id) => document.getElementById(id);
   const status = (msg) => { $('status').textContent = msg || ''; };
 
+  function showShortcutStatus(s) {
+    const warn = $('shortcutWarn');
+    const st = (s && s.shortcutStatus) || {};
+    const problems = [];
+    if (st.toggle === 'failed') problems.push('主窗口快捷键（' + (s.toggleShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
+    if (st.quickChat === 'failed') problems.push('Quick chat 快捷键（' + (s.quickChatShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
+    if (problems.length) {
+      warn.textContent = problems.join(' ');
+      warn.style.display = 'block';
+    } else {
+      warn.textContent = '';
+      warn.style.display = 'none';
+    }
+  }
+
   async function load() {
     try {
       const s = await window.museSettings.get();
       $('autoStart').checked = !!s.autoStart;
       $('minimizeToTray').checked = s.closeBehaviour !== 'quit';
       $('shortcutEnabled').checked = !!s.shortcutEnabled;
+      $('toggleShortcut').value = s.toggleShortcut || '';
+      $('quickChatEnabled').checked = !!s.quickChatEnabled;
+      $('quickChatShortcut').value = s.quickChatShortcut || '';
+      $('floatingButtonEnabled').checked = !!s.floatingButtonEnabled;
+      $('notificationsEnabled').checked = !!s.notificationsEnabled;
       $('checkUpdatesOnStartup').checked = !!s.checkUpdatesOnStartup;
       $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
       $('version').textContent = 'Muse Windows Client（非官方）· 每次改动都会立刻保存到本机配置文件';
+      showShortcutStatus(s);
     } catch (e) {
       status('读取设置失败：' + e.message);
     }
@@ -80,16 +128,43 @@
     try {
       const s = await window.museSettings.set(patch);
       $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
+      showShortcutStatus(s);
       status('已保存。');
+      return s;
     } catch (e) {
       status('保存失败：' + e.message);
+      return null;
     }
   }
 
   $('autoStart').addEventListener('change', (e) => save({ autoStart: e.target.checked }));
   $('minimizeToTray').addEventListener('change', (e) => save({ closeBehaviour: e.target.checked ? 'minimize-to-tray' : 'quit' }));
   $('shortcutEnabled').addEventListener('change', (e) => save({ shortcutEnabled: e.target.checked }));
+  $('quickChatEnabled').addEventListener('change', (e) => save({ quickChatEnabled: e.target.checked }));
+  $('floatingButtonEnabled').addEventListener('change', (e) => save({ floatingButtonEnabled: e.target.checked }));
+  $('notificationsEnabled').addEventListener('change', (e) => save({ notificationsEnabled: e.target.checked }));
   $('checkUpdatesOnStartup').addEventListener('change', (e) => save({ checkUpdatesOnStartup: e.target.checked }));
+  $('toggleShortcut').addEventListener('change', async (e) => {
+    const typed = e.target.value.trim();
+    const s = await save({ toggleShortcut: typed });
+    if (s) {
+      // Invalid input falls back to the previous value; show what stuck.
+      if (s.toggleShortcut !== typed) {
+        e.target.value = s.toggleShortcut;
+        status('快捷键格式不对，已恢复为 ' + s.toggleShortcut + '。');
+      }
+    }
+  });
+  $('quickChatShortcut').addEventListener('change', async (e) => {
+    const typed = e.target.value.trim();
+    const s = await save({ quickChatShortcut: typed });
+    if (s) {
+      if (s.quickChatShortcut !== typed) {
+        e.target.value = s.quickChatShortcut;
+        status('快捷键格式不对，已恢复为 ' + s.quickChatShortcut + '。');
+      }
+    }
+  });
   $('resetZoom').addEventListener('change', async (e) => {
     if (e.target.checked) { await save({ zoomFactor: 1.0 }); e.target.checked = false; }
   });
@@ -99,6 +174,12 @@
     try { await window.museSettings.checkForUpdates(); } catch (e) { status('检查更新失败：' + e.message); }
     $('checkBtn').disabled = false;
     status('');
+  });
+  $('testNotifBtn').addEventListener('click', async () => {
+    try {
+      const enabled = await window.museSettings.testNotification();
+      status(enabled ? '测试通知已发送。' : '通知已关闭，请先勾选“允许通知”。');
+    } catch (e) { status('发送测试通知失败：' + e.message); }
   });
   $('closeBtn').addEventListener('click', () => window.museSettings.close());
 

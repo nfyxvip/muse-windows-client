@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.2.0).
+ * Muse Windows Client — a simple unofficial wrapper (v0.3.0).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -15,6 +15,18 @@
  * - Update checking via electron-updater + GitHub Releases: check +
  *   prompt + manual download only, never silent auto-install.
  *
+ * Phase 2 (v0.3.0):
+ * - Quick chat: a small window (same login session as the main window)
+ *   toggled by a global shortcut (default Ctrl+Alt+Q). Esc hides it.
+ * - Floating button: a small draggable always-on-top button (off by
+ *   default); click it to show/hide the main window.
+ * - Customisable shortcuts: both global shortcuts can be changed in
+ *   Settings; a shortcut that fails to register reports the conflict
+ *   instead of silently doing nothing.
+ * - Notifications: a master switch in Settings. Web notifications from
+ *   muse.ai are allowed/denied through it, and the app's own toasts
+ *   honour it too.
+ *
  * Safety notes:
  * - The web page runs sandboxed, with Node integration off and
  *   context isolation on. The preload script exposes nothing except
@@ -28,7 +40,7 @@
  */
 'use strict';
 
-const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dialog, screen, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dialog, screen, ipcMain, Notification, session } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const config = require('./config');
@@ -38,16 +50,21 @@ const MUSE_URL = 'https://muse.ai';
 // refuse to boot) when they see Electron's default user agent, which
 // contains the word "Electron". A plain Chrome UA avoids that.
 const CHROME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
-const SHORTCUT = 'CommandOrControl+Alt+M';
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 860;
+const QUICK_CHAT_WIDTH = 480;
+const QUICK_CHAT_HEIGHT = 640;
+const FLOATING_SIZE = 64;
 
 let mainWindow = null;
 let settingsWindow = null;
+let quickChatWindow = null;
+let floatingWindow = null;
 let tray = null;
 let isQuitting = false;
-// 'ok' | 'failed' | 'disabled'
-let shortcutStatus = 'disabled';
+// 'ok' | 'failed' | 'disabled' — one per global shortcut.
+let toggleShortcutStatus = 'disabled';
+let quickChatShortcutStatus = 'disabled';
 let updateCheckInFlight = false;
 
 // electron-updater is optional at runtime: if it cannot be loaded,
@@ -264,6 +281,230 @@ function toggleWindow() {
   }
 }
 
+// --- Quick chat -------------------------------------------------------
+// A small window on the same login partition as the main window, so
+// the user is already logged in. There is no slim muse.ai entry
+// point, so it loads the full web app in a compact window.
+
+let saveQuickChatBoundsTimer = null;
+function saveQuickChatBounds() {
+  if (!quickChatWindow || quickChatWindow.isDestroyed() || quickChatWindow.isMinimized()) return;
+  try {
+    if (quickChatWindow.isMaximized() || quickChatWindow.isFullScreen()) return;
+    config.update({ quickChatBounds: quickChatWindow.getBounds() });
+  } catch (err) {
+    console.warn('Could not save Quick chat bounds:', err.message);
+  }
+}
+function scheduleSaveQuickChatBounds() {
+  if (saveQuickChatBoundsTimer) clearTimeout(saveQuickChatBoundsTimer);
+  saveQuickChatBoundsTimer = setTimeout(saveQuickChatBounds, 500);
+}
+
+function initialQuickChatBounds() {
+  const saved = config.get('quickChatBounds');
+  const fallback = { width: QUICK_CHAT_WIDTH, height: QUICK_CHAT_HEIGHT };
+  if (!saved) return fallback;
+  const displays = screen.getAllDisplays();
+  const onScreen = displays.some((d) => {
+    const a = d.workArea;
+    return saved.x >= a.x - 100 && saved.x < a.x + a.width &&
+      saved.y >= a.y - 100 && saved.y < a.y + a.height;
+  });
+  if (!onScreen) return fallback;
+  const primary = screen.getPrimaryDisplay().workArea;
+  return {
+    x: Math.max(primary.x, Math.min(saved.x, primary.x + primary.width - 200)),
+    y: Math.max(primary.y, Math.min(saved.y, primary.y + primary.height - 200)),
+    width: Math.min(Math.max(saved.width, 360), primary.width),
+    height: Math.min(Math.max(saved.height, 480), primary.height),
+  };
+}
+
+function createQuickChatWindow() {
+  if (quickChatWindow && !quickChatWindow.isDestroyed()) return quickChatWindow;
+  const bounds = initialQuickChatBounds();
+  quickChatWindow = new BrowserWindow({
+    ...bounds,
+    minWidth: 360,
+    minHeight: 480,
+    title: 'Quick chat — Muse',
+    icon: iconPath(),
+    show: false,
+    alwaysOnTop: true,
+    webPreferences: {
+      partition: 'persist:muse',
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      userAgent: CHROME_USER_AGENT,
+    },
+  });
+  quickChatWindow.loadURL(MUSE_URL);
+  quickChatWindow.once('ready-to-show', () => {
+    quickChatWindow.show();
+    quickChatWindow.focus();
+  });
+  console.log('Quick chat window created.');
+  // Esc hides Quick chat instead of closing it.
+  quickChatWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'Escape' && input.type === 'keyDown') {
+      quickChatWindow.hide();
+    }
+  });
+  quickChatWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isMuseUrl(url)) return { action: 'allow' };
+    openExternal(url);
+    return { action: 'deny' };
+  });
+  quickChatWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isMuseUrl(url)) {
+      event.preventDefault();
+      openExternal(url);
+    }
+  });
+  quickChatWindow.on('resize', scheduleSaveQuickChatBounds);
+  quickChatWindow.on('move', scheduleSaveQuickChatBounds);
+  // Closing Quick chat (X button) only hides it; the shortcut or the
+  // menu brings it back. Really destroy it only when quitting.
+  quickChatWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      saveQuickChatBounds();
+      quickChatWindow.hide();
+    }
+  });
+  quickChatWindow.on('closed', () => {
+    quickChatWindow = null;
+  });
+  return quickChatWindow;
+}
+
+function toggleQuickChat() {
+  if (!config.get('quickChatEnabled')) return;
+  if (!quickChatWindow || quickChatWindow.isDestroyed()) {
+    createQuickChatWindow();
+    return;
+  }
+  if (quickChatWindow.isVisible()) {
+    quickChatWindow.hide();
+  } else {
+    quickChatWindow.show();
+    quickChatWindow.focus();
+  }
+}
+
+// --- Floating button --------------------------------------------------
+// A small draggable always-on-top circle. Click toggles the main
+// window; right-click opens a small menu (open main window / hide the
+// button). Off by default; position is remembered.
+
+let saveFloatingBoundsTimer = null;
+function saveFloatingBounds() {
+  if (!floatingWindow || floatingWindow.isDestroyed()) return;
+  try {
+    const b = floatingWindow.getBounds();
+    config.update({ floatingButtonBounds: { x: b.x, y: b.y } });
+  } catch (err) {
+    console.warn('Could not save floating button position:', err.message);
+  }
+}
+function scheduleSaveFloatingBounds() {
+  if (saveFloatingBoundsTimer) clearTimeout(saveFloatingBoundsTimer);
+  saveFloatingBoundsTimer = setTimeout(saveFloatingBounds, 500);
+}
+
+function initialFloatingPosition() {
+  const saved = config.get('floatingButtonBounds');
+  const primary = screen.getPrimaryDisplay().workArea;
+  const fallback = {
+    x: primary.x + primary.width - FLOATING_SIZE - 24,
+    y: primary.y + Math.round(primary.height / 2),
+  };
+  if (!saved) return fallback;
+  const displays = screen.getAllDisplays();
+  const onScreen = displays.some((d) => {
+    const a = d.workArea;
+    return saved.x >= a.x - FLOATING_SIZE && saved.x < a.x + a.width &&
+      saved.y >= a.y - FLOATING_SIZE && saved.y < a.y + a.height;
+  });
+  if (!onScreen) return fallback;
+  return {
+    x: Math.max(primary.x, Math.min(saved.x, primary.x + primary.width - FLOATING_SIZE)),
+    y: Math.max(primary.y, Math.min(saved.y, primary.y + primary.height - FLOATING_SIZE)),
+  };
+}
+
+function createFloatingWindow() {
+  if (floatingWindow && !floatingWindow.isDestroyed()) return floatingWindow;
+  const pos = initialFloatingPosition();
+  floatingWindow = new BrowserWindow({
+    ...pos,
+    width: FLOATING_SIZE,
+    height: FLOATING_SIZE,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: 'Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'floating-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  floatingWindow.setMenu(null);
+  floatingWindow.loadFile(path.join(__dirname, 'floating.html'));
+  floatingWindow.once('ready-to-show', () => floatingWindow.show());
+  console.log('Floating button window created.');
+  floatingWindow.on('move', scheduleSaveFloatingBounds);
+  floatingWindow.webContents.on('context-menu', () => {
+    const menu = Menu.buildFromTemplate([
+      { label: '打开主窗口', click: () => toggleWindow() },
+      { label: '打开 Quick chat', click: () => toggleQuickChat() },
+      { type: 'separator' },
+      {
+        label: '隐藏悬浮按钮',
+        click: () => {
+          config.update({ floatingButtonEnabled: false });
+          destroyFloatingWindow();
+          buildTrayMenu();
+          buildMenu();
+        },
+      },
+    ]);
+    menu.popup({ window: floatingWindow });
+  });
+  floatingWindow.on('closed', () => {
+    floatingWindow = null;
+  });
+  return floatingWindow;
+}
+
+function destroyFloatingWindow() {
+  if (floatingWindow && !floatingWindow.isDestroyed()) {
+    saveFloatingBounds();
+    floatingWindow.destroy();
+  }
+  floatingWindow = null;
+}
+
+function applyFloatingButton() {
+  if (config.get('floatingButtonEnabled')) {
+    createFloatingWindow();
+  } else {
+    destroyFloatingWindow();
+  }
+}
+
 function createSettingsWindow() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.focus();
@@ -309,42 +550,115 @@ function applyAutoStart() {
   return enabled;
 }
 
-// --- Global shortcut --------------------------------------------------
+// --- Notifications --------------------------------------------------
 
-function registerShortcut() {
-  globalShortcut.unregister(SHORTCUT);
-  if (!config.get('shortcutEnabled')) {
-    shortcutStatus = 'disabled';
+/** Show a Windows toast, honouring the master switch in Settings. */
+function notify(title, body) {
+  if (!config.get('notificationsEnabled')) return;
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title, body });
+    n.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+    n.show();
+  } catch (err) {
+    console.warn('Could not show notification:', err.message);
+  }
+}
+
+/**
+ * Web notifications (the Notification API used by muse.ai) go through
+ * the session permission handler, so the master switch in Settings
+ * really turns them off instead of only hiding the app's own toasts.
+ */
+function wireNotificationPermission() {
+  try {
+    session.fromPartition('persist:muse').setPermissionRequestHandler(
+      (webContents, permission, callback) => {
+        if (permission === 'notifications') {
+          callback(!!config.get('notificationsEnabled'));
+        } else {
+          callback(true);
+        }
+      }
+    );
+  } catch (err) {
+    console.warn('Could not wire notification permission handler:', err.message);
+  }
+}
+
+// --- Global shortcuts -------------------------------------------------
+
+function describeShortcut(accelerator) {
+  return String(accelerator || '')
+    .replace(/CommandOrControl/g, 'Ctrl')
+    .replace(/CmdOrCtrl/g, 'Ctrl');
+}
+
+function registerOneShortcut(accelerator, handler) {
+  try {
+    return globalShortcut.register(accelerator, handler);
+  } catch (err) {
+    console.warn('Global shortcut registration threw:', accelerator, err.message);
     return false;
   }
-  let ok = false;
+}
+
+function reportShortcutFailure(label, accelerator) {
+  console.warn(
+    `Global shortcut ${label} (${accelerator}) could not be registered (it may be in use by another app). ` +
+    'The app keeps working without it; use the tray icon or the menu instead.'
+  );
   try {
-    ok = globalShortcut.register(SHORTCUT, toggleWindow);
-  } catch (err) {
-    console.warn('Global shortcut registration threw:', err.message);
-    ok = false;
-  }
-  if (ok) {
-    shortcutStatus = 'ok';
-  } else {
-    shortcutStatus = 'failed';
-    console.warn(
-      'Global shortcut Ctrl+Alt+M could not be registered (it may be in use by another app). ' +
-      'The app keeps working without it; use the tray icon to show/hide the window.'
-    );
-    try {
-      if (tray) {
-        tray.displayBalloon({
-          title: 'Muse',
-          content: '全局快捷键 Ctrl+Alt+M 注册失败，可能被其他软件占用。可用托盘图标显示 / 隐藏窗口。',
-        });
-      }
-    } catch (_) {
-      // Balloon notifications are best-effort only.
+    if (tray) {
+      tray.displayBalloon({
+        title: 'Muse',
+        content: `全局快捷键 ${label}（${describeShortcut(accelerator)}）注册失败，可能被其他软件占用。请在设置里换一个快捷键。`,
+      });
     }
+  } catch (_) {
+    // Balloon notifications are best-effort only.
   }
   buildTrayMenu();
-  return ok;
+  buildMenu();
+}
+
+function registerShortcuts() {
+  globalShortcut.unregisterAll();
+  toggleShortcutStatus = 'disabled';
+  quickChatShortcutStatus = 'disabled';
+
+  if (config.get('shortcutEnabled')) {
+    const accelerator = config.get('toggleShortcut') || 'CommandOrControl+Alt+M';
+    if (registerOneShortcut(accelerator, toggleWindow)) {
+      toggleShortcutStatus = 'ok';
+    } else {
+      toggleShortcutStatus = 'failed';
+      reportShortcutFailure('显示 / 隐藏主窗口', accelerator);
+    }
+  }
+
+  if (config.get('quickChatEnabled')) {
+    const accelerator = config.get('quickChatShortcut') || 'CommandOrControl+Alt+Q';
+    if (registerOneShortcut(accelerator, toggleQuickChat)) {
+      quickChatShortcutStatus = 'ok';
+    } else {
+      quickChatShortcutStatus = 'failed';
+      reportShortcutFailure('Quick chat', accelerator);
+    }
+  }
+
+  buildTrayMenu();
+  buildMenu();
+}
+
+// Backwards-compatible name used by the tray menu / settings IPC.
+function registerShortcut() {
+  registerShortcuts();
 }
 
 // --- Updates (check + prompt only, never silent install) --------------
@@ -451,12 +765,27 @@ function checkForUpdatesManual() {
 // --- Menus ------------------------------------------------------------
 
 function buildMenu() {
+  const toggleLabel = `显示 / 隐藏主窗口 (${describeShortcut(config.get('toggleShortcut'))})`;
+  const quickChatLabel = `Quick chat (${describeShortcut(config.get('quickChatShortcut'))})`;
   const template = [
     {
       label: '文件(&F)',
       submenu: [
         { label: '重新加载', accelerator: 'CmdOrCtrl+R', click: () => mainWindow && mainWindow.reload() },
         { label: '回到首页', click: () => mainWindow && mainWindow.loadURL(MUSE_URL) },
+        { type: 'separator' },
+        { label: quickChatLabel, click: () => toggleQuickChat() },
+        {
+          label: '悬浮按钮',
+          type: 'checkbox',
+          checked: !!config.get('floatingButtonEnabled'),
+          click: (menuItem) => {
+            config.update({ floatingButtonEnabled: menuItem.checked });
+            applyFloatingButton();
+            buildTrayMenu();
+            buildMenu();
+          },
+        },
         { type: 'separator' },
         { label: '设置…', accelerator: 'CmdOrCtrl+,', click: () => createSettingsWindow() },
         { type: 'separator' },
@@ -518,13 +847,20 @@ function buildTrayMenu() {
   if (!tray) return;
   const autoStart = !!config.get('autoStart');
   const shortcutEnabled = !!config.get('shortcutEnabled');
+  const quickChatEnabled = !!config.get('quickChatEnabled');
+  const floatingEnabled = !!config.get('floatingButtonEnabled');
   const minimizeToTray = config.get('closeBehaviour') !== 'quit';
-  const shortcutLabel =
-    shortcutStatus === 'failed'
-      ? '快捷键 Ctrl+Alt+M（注册失败）'
-      : '快捷键 Ctrl+Alt+M';
+  const toggleLabel =
+    toggleShortcutStatus === 'failed'
+      ? `主窗口快捷键 ${describeShortcut(config.get('toggleShortcut'))}（注册失败）`
+      : `主窗口快捷键 ${describeShortcut(config.get('toggleShortcut'))}`;
+  const quickChatLabel =
+    quickChatShortcutStatus === 'failed'
+      ? `Quick chat 快捷键 ${describeShortcut(config.get('quickChatShortcut'))}（注册失败）`
+      : `Quick chat 快捷键 ${describeShortcut(config.get('quickChatShortcut'))}`;
   const contextMenu = Menu.buildFromTemplate([
     { label: '显示 / 隐藏窗口', click: toggleWindow },
+    { label: 'Quick chat', click: () => toggleQuickChat() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
     {
@@ -538,13 +874,34 @@ function buildTrayMenu() {
       },
     },
     {
-      label: shortcutLabel,
+      label: toggleLabel,
       type: 'checkbox',
       checked: shortcutEnabled,
       click: (menuItem) => {
         config.update({ shortcutEnabled: menuItem.checked });
-        registerShortcut();
+        registerShortcuts();
         buildTrayMenu();
+      },
+    },
+    {
+      label: quickChatLabel,
+      type: 'checkbox',
+      checked: quickChatEnabled,
+      click: (menuItem) => {
+        config.update({ quickChatEnabled: menuItem.checked });
+        registerShortcuts();
+        buildTrayMenu();
+      },
+    },
+    {
+      label: '悬浮按钮',
+      type: 'checkbox',
+      checked: floatingEnabled,
+      click: (menuItem) => {
+        config.update({ floatingButtonEnabled: menuItem.checked });
+        applyFloatingButton();
+        buildTrayMenu();
+        buildMenu();
       },
     },
     {
@@ -600,10 +957,12 @@ if (!gotLock) {
     applyAutoStart();
 
     wireAutoUpdater();
+    wireNotificationPermission();
     buildMenu();
     createWindow();
     buildTray();
-    registerShortcut();
+    registerShortcuts();
+    applyFloatingButton();
 
     // Silent update check shortly after startup (no dialog unless an
     // update is actually available). Failures are logged only.
@@ -624,6 +983,8 @@ if (!gotLock) {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   saveWindowBounds();
+  saveQuickChatBounds();
+  saveFloatingBounds();
 });
 
 // Keep the tray alive when the window is hidden; only really quit
@@ -633,19 +994,58 @@ app.on('window-all-closed', (event) => {
 });
 
 // Settings window IPC (used by settings-preload.js).
-ipcMain.handle('settings-get', () => ({ ...config.load(), version: app.getVersion() }));
+ipcMain.handle('settings-get', () => ({
+  ...config.load(),
+  version: app.getVersion(),
+  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus },
+}));
 ipcMain.handle('settings-set', (event, partial) => {
   const next = config.update(partial || {});
-  if (Object.prototype.hasOwnProperty.call(partial || {}, 'autoStart')) applyAutoStart();
-  if (Object.prototype.hasOwnProperty.call(partial || {}, 'shortcutEnabled')) registerShortcut();
-  if (Object.prototype.hasOwnProperty.call(partial || {}, 'zoomFactor')) applyZoom();
+  const p = partial || {};
+  if (Object.prototype.hasOwnProperty.call(p, 'autoStart')) applyAutoStart();
+  if (
+    Object.prototype.hasOwnProperty.call(p, 'shortcutEnabled') ||
+    Object.prototype.hasOwnProperty.call(p, 'toggleShortcut') ||
+    Object.prototype.hasOwnProperty.call(p, 'quickChatEnabled') ||
+    Object.prototype.hasOwnProperty.call(p, 'quickChatShortcut')
+  ) {
+    registerShortcuts();
+  }
+  if (Object.prototype.hasOwnProperty.call(p, 'floatingButtonEnabled')) applyFloatingButton();
+  if (Object.prototype.hasOwnProperty.call(p, 'zoomFactor')) applyZoom();
   buildTrayMenu();
-  return next;
+  buildMenu();
+  return {
+    ...next,
+    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus },
+  };
 });
 ipcMain.handle('check-updates', () => {
   checkForUpdatesManual();
   return true;
 });
+ipcMain.handle('test-notification', () => {
+  notify('Muse Windows Client', '这是一条测试通知。以后 muse.ai 有消息提醒时，也会这样弹出来。');
+  return config.get('notificationsEnabled');
+});
 ipcMain.on('settings-close', () => {
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
+
+// Floating button IPC (used by floating-preload.js).
+ipcMain.handle('floating-toggle-main', () => {
+  toggleWindow();
+  return true;
+});
+
+// Exported for smoke tests only (the app entry point ignores exports).
+module.exports = {
+  config,
+  createQuickChatWindow,
+  toggleQuickChat,
+  createFloatingWindow,
+  destroyFloatingWindow,
+  applyFloatingButton,
+  registerShortcuts,
+  notify,
+};
