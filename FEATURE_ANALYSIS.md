@@ -4,7 +4,7 @@
 > 本文档只是分析（Phase 0），不做新功能开发。
 > 前提要先说清楚：**当前 Windows 客户端只是一个 Electron 壳子，打开的是网页版 muse.ai；它没有官方后端接口。** Mac 客户端很多能力是“官方客户端 + Muse 后端 + 系统配对”三方配合才能实现的，单靠一个本地壳子复制不了。这一点下面每一项都会如实标注，不夸大。
 
-- 现有版本：v0.6.0（Electron 38，electron-builder 26，electron-updater 6.8.11；Phase 1–5 均已于 2026-11-13 完成，见第 4 节）
+- 现有版本：v0.7.0（Electron 38，electron-builder 26，electron-updater 6.8.11；Phase 1–6 均已于 2026-11-13 完成，见第 4 节）
 - 现有文件：`main.js`、`preload.js`、`package.json`、`build/icon.png` / `icon.ico`、`README.md`
 - Mac 功能依据：`~/docs/client-surfaces.md`（Mac app 一节）、`~/docs/devices/mac_app.md`
 - 目标系统：Windows 10 / 11（64 位）
@@ -282,6 +282,12 @@
   - 做本地文件搜索的轻量版：只搜已授权文件夹里的文件名（不读内容、不建全盘索引），方便在聊天里快速找到项目文件发给 Edison。
 - **需要 mingzhen 做的事：** 确认最常用的是哪几个云端账号（Gmail 还是 Outlook、日历用哪个），优先把那几个的连接流程在 Windows 客户端里跑通。
 - **风险：** 不要为了“像 Mac 一样”去破解 WhatsApp / 微信的本地数据库，这是红线；云端账号的授权要走官方连接器，不要在壳子里存密码。
+
+**Phase 6 完成情况（2026-11-13，v0.7.0）：代码部分已完成，Windows 实测部分待 mingzhen 在真机上做。**
+- 已做：云端服务入口（文件菜单 / 托盘菜单 → 连接云端服务…，打开一个服务列表窗口，点“打开”在默认浏览器里打开对应服务：Muse、Gmail、Outlook、Google 日历、Microsoft To Do、Google Drive、OneDrive）；授权在 muse.ai 网页版里走官方连接器，客户端不问密码、不存密码；文件名搜索（按 `Ctrl+Alt+F` 弹出搜索窗口，只搜已授权文件夹里的文件名，不读文件内容、不建全盘索引，黑名单文件夹始终排除；点一行复制路径，点 ★ 收藏，按钮打开所在文件夹；不输关键词时显示收藏和最近文件；快捷键可在设置里改）；版本号升到 0.7.0；README、CHANGELOG 已更新。
+- 明确没做的：读本地私有库（WhatsApp / 微信本地库、Outlook PST、Apple 应用数据）——红线，不做。
+- Linux 虚拟机上已验证：`node --check` 全部通过；Electron 实跑冒烟测试 20/20 通过（新设置默认值、搜索大小写不敏感、黑名单排除、只匹配文件名不读内容、嵌套文件、收藏开关、7 个云端服务入口全是 https、搜索与连接窗口打开无崩溃、五组快捷键注册）。
+- 待 mingzhen 在 Windows 10 / 11 真机上做：授权 CI4 项目文件夹后试文件名搜索（比如搜 “cart”）；点“连接云端服务…”打开 muse.ai 完成 Gmail / Outlook / 日历的连接；确认最常用的是哪几个云端账号，告诉 Edison 优先跑通哪几个。
 
 ---
 

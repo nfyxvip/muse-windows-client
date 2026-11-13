@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>文件名搜索 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; }
+  .wrap { padding: 16px 18px; display: flex; flex-direction: column; height: 100vh; }
+  #q {
+    width: 100%; font-size: 15px; padding: 10px 12px;
+    border: 1px solid #ccc; border-radius: 8px; font-family: inherit;
+  }
+  #status { font-size: 12px; color: #666; margin: 10px 0; min-height: 18px; line-height: 1.6; }
+  #results { flex: 1; overflow-y: auto; }
+  .section-title { font-size: 12px; color: #888; margin: 10px 0 6px; }
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    background: #fff; border: 1px solid #e3e3e3; border-radius: 8px;
+    padding: 9px 12px; margin-bottom: 8px; cursor: pointer;
+  }
+  .row:hover { border-color: #111; }
+  .row .info { flex: 1; min-width: 0; }
+  .row .name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .path { font-size: 11px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+  .star { background: none; border: none; font-size: 17px; cursor: pointer; padding: 2px 4px; color: #bbb; flex: 0 0 auto; }
+  .star.on { color: #e6a700; }
+  .mini { font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; flex: 0 0 auto; }
+  .empty { color: #999; font-size: 13px; padding: 8px 2px; line-height: 1.7; }
+  .btns { display: flex; gap: 10px; margin-top: 12px; }
+  button.big { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  button.big.primary { background: #111; color: #fff; border-color: #111; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <input id="q" type="text" placeholder="输入文件名的一部分…" autocomplete="off" spellcheck="false">
+  <div id="status">只搜已授权文件夹里的文件名，不读文件内容，不建全盘索引。</div>
+  <div id="results"></div>
+  <div class="btns"><button id="closeBtn" type="button" class="big primary">关闭</button></div>
+</div>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const qEl = $('q');
+  const statusEl = $('status');
+  const resultsEl = $('results');
+
+  let state = { authorizedFolders: [], recentFiles: [], favoriteFiles: [] };
+  let favorites = new Set();
+  let debounce = null;
+
+  const setStatus = (msg) => { statusEl.textContent = msg; };
+  const baseName = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
+
+  function makeRow(item, opts) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'star' + (favorites.has(item.path) ? ' on' : '');
+    star.textContent = favorites.has(item.path) ? '★' : '☆';
+    star.title = favorites.has(item.path) ? '取消收藏' : '收藏';
+    star.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const updated = await window.museSearch.toggleFavorite(item.path);
+      favorites = new Set(updated || []);
+      star.classList.toggle('on', favorites.has(item.path));
+      star.textContent = favorites.has(item.path) ? '★' : '☆';
+      star.title = favorites.has(item.path) ? '取消收藏' : '收藏';
+    });
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = item.name;
+    const p = document.createElement('div');
+    p.className = 'path';
+    p.textContent = item.path;
+    info.appendChild(name);
+    info.appendChild(p);
+    const folderBtn = document.createElement('button');
+    folderBtn.type = 'button';
+    folderBtn.className = 'mini';
+    folderBtn.textContent = '打开所在文件夹';
+    folderBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await window.museSearch.openFolder(item.path);
+    });
+    row.appendChild(star);
+    row.appendChild(info);
+    row.appendChild(folderBtn);
+    row.addEventListener('click', async () => {
+      await window.museSearch.copyPath(item.path);
+      setStatus('已复制路径：' + item.path + '，粘贴进聊天即可。');
+    });
+    return row;
+  }
+
+  function renderHome() {
+    resultsEl.innerHTML = '';
+    if (state.authorizedFolders.length === 0) {
+      const div = document.createElement('div');
+      div.className = 'empty';
+      div.textContent = '还没有授权文件夹。先在设置 → 文件与授权文件夹里添加文件夹（比如你的 CI4 项目文件夹），再回来搜。';
+      resultsEl.appendChild(div);
+      return;
+    }
+    if (state.favoriteFiles.length > 0) {
+      const t = document.createElement('div');
+      t.className = 'section-title';
+      t.textContent = '收藏';
+      resultsEl.appendChild(t);
+      state.favoriteFiles.forEach((p) => {
+        resultsEl.appendChild(makeRow({ name: baseName(p), path: p }));
+      });
+    }
+    if (state.recentFiles.length > 0) {
+      const t = document.createElement('div');
+      t.className = 'section-title';
+      t.textContent = '最近文件';
+      resultsEl.appendChild(t);
+      state.recentFiles.forEach((p) => {
+        resultsEl.appendChild(makeRow({ name: baseName(p), path: p }));
+      });
+    }
+    if (state.favoriteFiles.length === 0 && state.recentFiles.length === 0) {
+      const div = document.createElement('div');
+      div.className = 'empty';
+      div.textContent = '输入文件名的一部分开始搜索。点一行复制路径，点 ★ 收藏。';
+      resultsEl.appendChild(div);
+    }
+  }
+
+  async function doSearch(query) {
+    if (!query.trim()) { renderHome(); return; }
+    setStatus('正在搜索…');
+    try {
+      const r = await window.museSearch.search(query);
+      resultsEl.innerHTML = '';
+      if (!r || !r.results || r.results.length === 0) {
+        setStatus('在 ' + (r ? r.folders : 0) + ' 个已授权文件夹里没有找到匹配的文件名。');
+        const div = document.createElement('div');
+        div.className = 'empty';
+        div.textContent = '没有找到匹配的文件名。试试更短的关键词（比如只输 “cart”）。';
+        resultsEl.appendChild(div);
+        return;
+      }
+      setStatus('在 ' + r.folders + ' 个已授权文件夹里找到 ' + r.results.length + ' 个结果（只搜文件名，不读文件内容）。点一行复制路径。');
+      r.results.forEach((item) => resultsEl.appendChild(makeRow(item)));
+    } catch (e) {
+      setStatus('搜索失败：' + e.message);
+    }
+  }
+
+  qEl.addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => doSearch(qEl.value), 250);
+  });
+  qEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') window.museSearch.close();
+  });
+  $('closeBtn').addEventListener('click', () => window.museSearch.close());
+
+  (async function load() {
+    try {
+      state = await window.museSearch.getState();
+      favorites = new Set(state.favoriteFiles || []);
+      if (!state.authorizedFolders || state.authorizedFolders.length === 0) {
+        setStatus('还没有授权文件夹。先在设置 → 文件与授权文件夹里添加文件夹，再回来搜。');
+      } else {
+        setStatus('已授权 ' + state.authorizedFolders.length + ' 个文件夹。只搜文件名，不读文件内容。');
+      }
+      renderHome();
+    } catch (e) {
+      setStatus('读取状态失败：' + e.message);
+    }
+    qEl.focus();
+  })();
+})();
+</script>
+</body>
+</html>

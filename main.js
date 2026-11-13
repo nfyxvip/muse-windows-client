@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.6.0).
+ * Muse Windows Client — a simple unofficial wrapper (v0.7.0).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -67,6 +67,21 @@
  * exact X / Y / width / height inputs in the preview to re-crop
  * the last capture to a precise size.
  *
+ * Phase 6 (v0.7.0):
+ * - Cloud service entries: a "Connect" window that jumps to the
+ *   services' web apps (Muse, Gmail, Outlook, Google Calendar,
+ *   Microsoft To Do, Google Drive, OneDrive). Authorization happens
+ *   in the Muse web app through its official connectors; this
+ *   client never asks for or stores any service password.
+ * - Filename-only search in authorized folders: no content is read,
+ *   no whole-disk index is built. Results can be copied (paste the
+ *   path into the chat) or opened in their folder. The search window
+ *   also shows starred files and recent files when the query is empty.
+ * - NOT built, on purpose: reading local private databases
+ *   (WhatsApp / WeChat local stores, Outlook PST, Apple app data).
+ *   That is a red line; cloud accounts go through official
+ *   connectors instead.
+ *
  * Safety notes:
  * - The web page runs sandboxed, with Node integration off and
  *   context isolation on. The preload script exposes nothing except
@@ -106,6 +121,8 @@ let dictationWindow = null;
 let captureWindow = null;
 let cameraWindow = null;
 let regionWindow = null;
+let searchWindow = null;
+let connectWindow = null;
 let lastFullCapture = null; // { image: nativeImage, rect: {x,y,width,height} in image pixels }
 let floatingWindow = null;
 let tray = null;
@@ -115,6 +132,7 @@ let toggleShortcutStatus = 'disabled';
 let quickChatShortcutStatus = 'disabled';
 let dictationShortcutStatus = 'disabled';
 let screenshotShortcutStatus = 'disabled';
+let searchShortcutStatus = 'disabled';
 let updateCheckInFlight = false;
 
 // electron-updater is optional at runtime: if it cannot be loaded,
@@ -937,6 +955,172 @@ async function runAutomation(action) {
   }
 }
 
+// --- Phase 6: cloud service entries -----------------------------------
+// Entry jumps only. Authorization happens in the Muse web app through
+// its official connectors; this client never asks for or stores any
+// service password. Local private databases are never read.
+
+const CLOUD_SERVICES = [
+  { id: 'muse', name: 'Muse', desc: '在 muse.ai 网页版里连接 Gmail、Outlook、Google 日历等，连接成功后在 Windows 客户端里就能直接用。', url: MUSE_URL },
+  { id: 'gmail', name: 'Gmail', desc: 'Google 邮箱网页版', url: 'https://mail.google.com/' },
+  { id: 'outlook', name: 'Outlook', desc: '微软邮箱网页版', url: 'https://outlook.live.com/' },
+  { id: 'gcal', name: 'Google 日历', desc: 'Google 日历网页版', url: 'https://calendar.google.com/' },
+  { id: 'todo', name: 'Microsoft To Do', desc: '微软待办事项网页版', url: 'https://to-do.live.com/' },
+  { id: 'gdrive', name: 'Google Drive', desc: 'Google 云端硬盘网页版', url: 'https://drive.google.com/' },
+  { id: 'onedrive', name: 'OneDrive', desc: '微软 OneDrive 网页版', url: 'https://onedrive.live.com/' },
+];
+
+function createConnectWindow() {
+  if (connectWindow && !connectWindow.isDestroyed()) {
+    connectWindow.focus();
+    return connectWindow;
+  }
+  connectWindow = new BrowserWindow({
+    width: 560,
+    height: 560,
+    minWidth: 480,
+    minHeight: 420,
+    title: '连接云端服务 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'connect-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  connectWindow.setMenu(null);
+  connectWindow.loadFile(path.join(__dirname, 'connect.html'));
+  connectWindow.once('ready-to-show', () => {
+    connectWindow.show();
+    connectWindow.focus();
+  });
+  connectWindow.on('closed', () => {
+    connectWindow = null;
+  });
+  return connectWindow;
+}
+
+// --- Phase 6: filename-only search ------------------------------------
+// Only file NAMES are matched. File contents are never opened or read,
+// and no whole-disk index is built. Search stays inside the folders
+// the user authorized in Settings; blocked folders always win.
+
+const SEARCH_MAX_SCANNED = 20000;
+const SEARCH_MAX_RESULTS = 200;
+const SEARCH_MAX_DEPTH = 8;
+
+function searchFileNames(query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return { results: [], scanned: 0, folders: 0 };
+  const folders = config.get('authorizedFolders') || [];
+  const blocked = config.get('blockedFolders') || [];
+  const results = [];
+  let scanned = 0;
+  const isBlocked = (dir) => blocked.some((b) => dir === b || dir.startsWith(b + path.sep));
+  function walk(dir, depth) {
+    if (results.length >= SEARCH_MAX_RESULTS || scanned >= SEARCH_MAX_SCANNED || depth > SEARCH_MAX_DEPTH) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      return; // unreadable folder: skip it quietly.
+    }
+    for (const e of entries) {
+      if (results.length >= SEARCH_MAX_RESULTS || scanned >= SEARCH_MAX_SCANNED) return;
+      if (e.name.startsWith('.')) continue; // hidden files and folders.
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name === '.git' || isBlocked(full)) continue;
+        walk(full, depth + 1);
+      } else if (e.isFile()) {
+        scanned++;
+        if (e.name.toLowerCase().includes(q)) {
+          results.push({ name: e.name, path: full, folder: dir });
+        }
+      }
+    }
+  }
+  let usableFolders = 0;
+  for (const f of folders) {
+    if (!f || isBlocked(f)) continue;
+    usableFolders++;
+    walk(f, 0);
+  }
+  return { results, scanned, folders: usableFolders };
+}
+
+function toggleFavoriteFile(filePath) {
+  const favs = config.get('favoriteFiles') || [];
+  const idx = favs.indexOf(filePath);
+  if (idx >= 0) {
+    favs.splice(idx, 1);
+  } else {
+    favs.unshift(filePath);
+  }
+  config.update({ favoriteFiles: favs.slice(0, 20) });
+  return config.get('favoriteFiles') || [];
+}
+
+function createSearchWindow() {
+  if (searchWindow && !searchWindow.isDestroyed()) {
+    searchWindow.show();
+    searchWindow.focus();
+    return searchWindow;
+  }
+  searchWindow = new BrowserWindow({
+    width: 600,
+    height: 520,
+    minWidth: 480,
+    minHeight: 360,
+    title: '文件名搜索 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'search-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  searchWindow.setMenu(null);
+  searchWindow.loadFile(path.join(__dirname, 'search.html'));
+  searchWindow.once('ready-to-show', () => {
+    searchWindow.show();
+    searchWindow.focus();
+  });
+  searchWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      searchWindow.hide();
+      event.preventDefault();
+    }
+  });
+  searchWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      searchWindow.hide();
+    }
+  });
+  searchWindow.on('closed', () => {
+    searchWindow = null;
+  });
+  return searchWindow;
+}
+
+function toggleSearch() {
+  if (!searchWindow || searchWindow.isDestroyed()) {
+    createSearchWindow();
+    return;
+  }
+  if (searchWindow.isVisible()) {
+    searchWindow.hide();
+  } else {
+    searchWindow.show();
+    searchWindow.focus();
+  }
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -1372,6 +1556,16 @@ function registerShortcuts() {
     }
   }
 
+  {
+    const accelerator = config.get('searchShortcut') || 'CommandOrControl+Alt+F';
+    if (registerOneShortcut(accelerator, toggleSearch)) {
+      searchShortcutStatus = 'ok';
+    } else {
+      searchShortcutStatus = 'failed';
+      reportShortcutFailure('文件名搜索', accelerator);
+    }
+  }
+
   buildTrayMenu();
   buildMenu();
 }
@@ -1499,6 +1693,8 @@ function buildMenu() {
         { label: `听写 (${describeShortcut(config.get('dictationShortcut'))})`, click: () => toggleDictation() },
         { label: `截屏 (${describeShortcut(config.get('screenshotShortcut'))})`, click: () => openCaptureWindow() },
         { label: '拍照', click: () => openCameraWindow() },
+        { label: `文件名搜索 (${describeShortcut(config.get('searchShortcut'))})`, click: () => toggleSearch() },
+        { label: '连接云端服务…', click: () => createConnectWindow() },
         {
           label: '本地操作',
           submenu: [
@@ -1601,6 +1797,8 @@ function buildTrayMenu() {
     { label: '听写', click: () => toggleDictation() },
     { label: '截屏', click: () => openCaptureWindow() },
     { label: '拍照', click: () => openCameraWindow() },
+    { label: '文件名搜索', click: () => toggleSearch() },
+    { label: '连接云端服务…', click: () => createConnectWindow() },
     { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
@@ -1749,7 +1947,7 @@ app.on('window-all-closed', (event) => {
 ipcMain.handle('settings-get', () => ({
   ...config.load(),
   version: app.getVersion(),
-  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus },
+  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus },
 }));
 ipcMain.handle('settings-set', (event, partial) => {
   const next = config.update(partial || {});
@@ -1763,7 +1961,8 @@ ipcMain.handle('settings-set', (event, partial) => {
     Object.prototype.hasOwnProperty.call(p, 'dictationEnabled') ||
     Object.prototype.hasOwnProperty.call(p, 'dictationShortcut') ||
     Object.prototype.hasOwnProperty.call(p, 'screenshotEnabled') ||
-    Object.prototype.hasOwnProperty.call(p, 'screenshotShortcut')
+    Object.prototype.hasOwnProperty.call(p, 'screenshotShortcut') ||
+    Object.prototype.hasOwnProperty.call(p, 'searchShortcut')
   ) {
     registerShortcuts();
   }
@@ -1773,7 +1972,7 @@ ipcMain.handle('settings-set', (event, partial) => {
   buildMenu();
   return {
     ...next,
-    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus },
+    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus },
   };
 });
 ipcMain.handle('check-updates', () => {
@@ -1936,6 +2135,59 @@ ipcMain.on('camera-close', () => {
   if (cameraWindow && !cameraWindow.isDestroyed()) cameraWindow.close();
 });
 
+// Cloud service entries + filename search (used by connect/search preloads).
+ipcMain.handle('connect-list', () => CLOUD_SERVICES.map((s) => ({ ...s })));
+ipcMain.handle('connect-open', async (event, url) => {
+  const allowed = CLOUD_SERVICES.some((s) => s.url === url);
+  if (!allowed) return false;
+  try {
+    await shell.openExternal(url);
+    return true;
+  } catch (err) {
+    console.warn('Could not open cloud service:', err.message);
+    return false;
+  }
+});
+ipcMain.on('connect-close', () => {
+  if (connectWindow && !connectWindow.isDestroyed()) connectWindow.close();
+});
+ipcMain.handle('search-state', () => ({
+  authorizedFolders: config.get('authorizedFolders') || [],
+  recentFiles: config.get('recentFiles') || [],
+  favoriteFiles: config.get('favoriteFiles') || [],
+}));
+ipcMain.handle('search-files', async (event, query) => {
+  try {
+    return searchFileNames(query);
+  } catch (err) {
+    console.warn('Could not search files:', err.message);
+    return { results: [], scanned: 0, folders: 0 };
+  }
+});
+ipcMain.handle('search-toggle-favorite', (event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return config.get('favoriteFiles') || [];
+  return toggleFavoriteFile(filePath);
+});
+ipcMain.handle('search-copy-path', (event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return false;
+  clipboard.writeText(filePath);
+  notify('路径已复制', '文件路径已复制到剪贴板，粘贴进聊天即可。');
+  return true;
+});
+ipcMain.handle('search-open-folder', async (event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return false;
+  try {
+    shell.showItemInFolder(filePath);
+    return true;
+  } catch (err) {
+    console.warn('Could not show item in folder:', err.message);
+    return false;
+  }
+});
+ipcMain.on('search-close', () => {
+  if (searchWindow && !searchWindow.isDestroyed()) searchWindow.hide();
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -1948,6 +2200,11 @@ module.exports = {
   createRegionWindow,
   captureRegion,
   recropCapture,
+  createSearchWindow,
+  createConnectWindow,
+  searchFileNames,
+  toggleFavoriteFile,
+  CLOUD_SERVICES,
   listCaptureSources,
   captureSource,
   canAutomate,

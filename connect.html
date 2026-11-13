@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>连接云端服务 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; }
+  .wrap { padding: 18px 20px; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: #666; font-size: 12px; margin: 0 0 14px; line-height: 1.7; }
+  #status { font-size: 13px; color: #444; margin-bottom: 12px; min-height: 20px; }
+  .service { display: flex; align-items: center; gap: 12px; background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .service .info { flex: 1; min-width: 0; }
+  .service .name { font-size: 14px; font-weight: 600; }
+  .service .desc { font-size: 12px; color: #666; line-height: 1.6; margin-top: 2px; }
+  button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; flex: 0 0 auto; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>连接云端服务</h1>
+  <p class="sub">这里只做入口跳转：点“打开”会在默认浏览器里打开对应服务。Gmail、Outlook、Google 日历这些账号要在 muse.ai 网页版里连接（官方连接器），连接成功后在 Windows 客户端里就能直接用。客户端不会问你要任何服务的密码，也不会存密码。</p>
+  <div id="status"></div>
+  <div id="list"></div>
+  <div class="btns"><button id="closeBtn" type="button" class="primary">关闭</button></div>
+</div>
+<script>
+(function () {
+  const listEl = document.getElementById('list');
+  const statusEl = document.getElementById('status');
+
+  (async function load() {
+    try {
+      const services = await window.museConnect.list();
+      listEl.innerHTML = '';
+      services.forEach((s) => {
+        const row = document.createElement('div');
+        row.className = 'service';
+        const info = document.createElement('div');
+        info.className = 'info';
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = s.name;
+        const desc = document.createElement('div');
+        desc.className = 'desc';
+        desc.textContent = s.desc;
+        info.appendChild(name);
+        info.appendChild(desc);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = '打开';
+        btn.addEventListener('click', async () => {
+          const ok = await window.museConnect.open(s.url);
+          statusEl.textContent = ok ? '已在浏览器中打开 ' + s.name + '。' : '打开失败，请重试。';
+        });
+        row.appendChild(info);
+        row.appendChild(btn);
+        listEl.appendChild(row);
+      });
+    } catch (e) {
+      statusEl.textContent = '读取服务列表失败：' + e.message;
+    }
+  })();
+
+  document.getElementById('closeBtn').addEventListener('click', () => window.museConnect.close());
+})();
+</script>
+</body>
+</html>

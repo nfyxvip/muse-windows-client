@@ -165,6 +165,10 @@ const DEFAULTS = Object.freeze({
   // Permissions the user has already confirmed on first use
   // ('screenshot' | 'camera' | 'automation').
   confirmedPermissions: [],
+  // Phase 6: filename search.
+  searchShortcut: 'CommandOrControl+Alt+F',
+  // Starred file paths shown in the search window (max 20).
+  favoriteFiles: [],
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -225,6 +229,8 @@ function sanitize(raw) {
   if (typeof raw.automationAllowBrowser === 'boolean') out.automationAllowBrowser = raw.automationAllowBrowser;
   out.confirmedPermissions = sanitizeStringList(raw.confirmedPermissions, 10)
     .filter((p) => p === 'screenshot' || p === 'camera' || p === 'automation');
+  if (isValidAccelerator(raw.searchShortcut)) out.searchShortcut = raw.searchShortcut;
+  out.favoriteFiles = sanitizeStringList(raw.favoriteFiles, 20);
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }

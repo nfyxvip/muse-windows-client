@@ -49,6 +49,7 @@
     <div class="field"><span>主窗口：</span><input type="text" id="toggleShortcut" spellcheck="false"></div>
     <label class="row"><input type="checkbox" id="quickChatEnabled"> 启用 Quick chat 快捷键（弹出 / 收起小窗口）</label>
     <div class="field"><span>Quick chat：</span><input type="text" id="quickChatShortcut" spellcheck="false"></div>
+    <div class="field"><span>文件名搜索：</span><input type="text" id="searchShortcut" spellcheck="false"></div>
     <p class="hint">格式例如 Ctrl+Alt+M、Ctrl+Alt+Q、Ctrl+Shift+K。至少要一个修饰键（Ctrl / Alt / Shift）加一个按键。改完立刻生效。</p>
     <p class="warn" id="shortcutWarn" style="display:none"></p>
   </section>
@@ -147,6 +148,7 @@
     if (st.quickChat === 'failed') problems.push('Quick chat 快捷键（' + (s.quickChatShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.dictation === 'failed') problems.push('听写快捷键（' + (s.dictationShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.screenshot === 'failed') problems.push('截屏快捷键（' + (s.screenshotShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
+    if (st.search === 'failed') problems.push('文件名搜索快捷键（' + (s.searchShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (problems.length) {
       warn.textContent = problems.join(' ');
       warn.style.display = 'block';
@@ -234,6 +236,7 @@
       $('toggleShortcut').value = s.toggleShortcut || '';
       $('quickChatEnabled').checked = !!s.quickChatEnabled;
       $('quickChatShortcut').value = s.quickChatShortcut || '';
+      $('searchShortcut').value = s.searchShortcut || '';
       $('floatingButtonEnabled').checked = !!s.floatingButtonEnabled;
       $('notificationsEnabled').checked = !!s.notificationsEnabled;
       $('microphoneEnabled').checked = !!s.microphoneEnabled;
@@ -299,6 +302,16 @@
       if (s.quickChatShortcut !== typed) {
         e.target.value = s.quickChatShortcut;
         status('快捷键格式不对，已恢复为 ' + s.quickChatShortcut + '。');
+      }
+    }
+  });
+  $('searchShortcut').addEventListener('change', async (e) => {
+    const typed = e.target.value.trim();
+    const s = await save({ searchShortcut: typed });
+    if (s) {
+      if (s.searchShortcut !== typed) {
+        e.target.value = s.searchShortcut;
+        status('快捷键格式不对，已恢复为 ' + s.searchShortcut + '。');
       }
     }
   });
