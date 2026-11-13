@@ -34,6 +34,10 @@ const fs = require('node:fs');
 const config = require('./config');
 
 const MUSE_URL = 'https://muse.ai';
+// Pretend to be desktop Chrome: some sites serve a broken page (or
+// refuse to boot) when they see Electron's default user agent, which
+// contains the word "Electron". A plain Chrome UA avoids that.
+const CHROME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const SHORTCUT = 'CommandOrControl+Alt+M';
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 860;
@@ -175,11 +179,38 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      userAgent: CHROME_USER_AGENT,
     },
   });
 
   applyZoom();
   mainWindow.loadURL(MUSE_URL);
+
+  // If the page itself fails to load (network down, muse.ai blocked,
+  // certificate problem), Electron's blank error page tells the user
+  // nothing. Show the real error code instead, with actions.
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    console.warn('Page failed to load:', errorCode, errorDescription, validatedURL);
+    dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: '无法打开 Muse',
+      message: 'Muse 页面加载失败',
+      detail:
+        `地址：${validatedURL}\n错误：${errorDescription}（代码 ${errorCode}）\n\n` +
+        '可能的原因：\n' +
+        '• 网络无法访问 muse.ai（在中国大陆通常需要 VPN/代理才能打开 Meta 的服务）\n' +
+        '• 代理或防火墙拦截了连接\n' +
+        '• 证书问题\n\n' +
+        '可以先在 Edge/Chrome 里打开 https://muse.ai 试试：如果浏览器里也打不开，就是网络问题，与客户端无关；如果浏览器能打开，请把上面的错误信息发给我。',
+      buttons: ['重试', '在浏览器中打开', '关闭'],
+      defaultId: 0,
+      cancelId: 2,
+    }).then(({ response }) => {
+      if (response === 0 && mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(MUSE_URL);
+      else if (response === 1) openExternal(MUSE_URL);
+    }).catch(() => {});
+  });
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     applyZoom();
@@ -344,7 +375,7 @@ function checkForUpdates(manual) {
         message: '检查更新失败',
         detail:
           '原因：' + (err && err.message ? err.message : String(err)) + '\n\n' +
-          '最常见的原因是还没有配置 GitHub 更新仓库。请按 README 的“自动更新”一节，先在 GitHub 上创建 mingzhen/muse-windows-client 仓库并发布一个 Release，更新检查才能工作。',
+          '最常见的原因是还没有配置 GitHub 更新仓库。请按 README 的“自动更新”一节，先在 GitHub 上创建 nfyxvip/muse-windows-client 仓库并发布一个 Release，更新检查才能工作。',
       });
     }
   });

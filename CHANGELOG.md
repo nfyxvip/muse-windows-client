@@ -1,5 +1,17 @@
 # CHANGELOG — Muse Windows Client（非官方）
 
+## v0.2.1 — 2026-11-13（加载失败修复）
+
+### 修复
+
+- 客户端改用桌面版 Chrome 的 User-Agent：之前默认的 Electron UA 可能导致 muse.ai 返回异常页面（打开就显示“出错了”）。换成普通 Chrome UA 后，网站按正常浏览器对待。
+- 页面加载失败不再只显示空白错误页：现在会弹出诊断提示，显示真实的错误代码和地址，并提供“重试 / 在浏览器中打开”两个操作。
+- 更新仓库地址从占位用的 `mingzhen/muse-windows-client` 改为真实仓库 `nfyxvip/muse-windows-client`。
+
+### 已知
+
+- 如果在中国大陆直连 muse.ai 打不开（Meta 服务通常需要 VPN/代理），这是网络问题，不是客户端的 bug：先在 Edge/Chrome 里打开 https://muse.ai 验证。
+
 ## v0.2.0 — 2026-11-13（Phase 1：核心打磨）
 
 ### 修复
