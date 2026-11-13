@@ -149,6 +149,22 @@ const DEFAULTS = Object.freeze({
   dictationBounds: null,
   // Allow the web page and dictation to use the microphone.
   microphoneEnabled: true,
+  // Phase 5 permissions — all default OFF. Each one asks for
+  // confirmation on first use.
+  screenshotEnabled: false,
+  cameraEnabled: false,
+  automationEnabled: false,
+  // Accelerator that opens the screenshot picker.
+  screenshotShortcut: 'CommandOrControl+Alt+S',
+  // Local automation whitelist: only these actions can run, and only
+  // after a per-use confirmation. Everything else is blocked.
+  automationAllowNotepad: false,
+  automationAllowCalculator: false,
+  automationAllowExplorer: false,
+  automationAllowBrowser: false,
+  // Permissions the user has already confirmed on first use
+  // ('screenshot' | 'camera' | 'automation').
+  confirmedPermissions: [],
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -199,6 +215,16 @@ function sanitize(raw) {
   const db = sanitizeBounds(raw.dictationBounds, 360, 480);
   if (db) out.dictationBounds = db;
   if (typeof raw.microphoneEnabled === 'boolean') out.microphoneEnabled = raw.microphoneEnabled;
+  if (typeof raw.screenshotEnabled === 'boolean') out.screenshotEnabled = raw.screenshotEnabled;
+  if (typeof raw.cameraEnabled === 'boolean') out.cameraEnabled = raw.cameraEnabled;
+  if (typeof raw.automationEnabled === 'boolean') out.automationEnabled = raw.automationEnabled;
+  if (isValidAccelerator(raw.screenshotShortcut)) out.screenshotShortcut = raw.screenshotShortcut;
+  if (typeof raw.automationAllowNotepad === 'boolean') out.automationAllowNotepad = raw.automationAllowNotepad;
+  if (typeof raw.automationAllowCalculator === 'boolean') out.automationAllowCalculator = raw.automationAllowCalculator;
+  if (typeof raw.automationAllowExplorer === 'boolean') out.automationAllowExplorer = raw.automationAllowExplorer;
+  if (typeof raw.automationAllowBrowser === 'boolean') out.automationAllowBrowser = raw.automationAllowBrowser;
+  out.confirmedPermissions = sanitizeStringList(raw.confirmedPermissions, 10)
+    .filter((p) => p === 'screenshot' || p === 'camera' || p === 'automation');
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>截屏 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; }
+  .wrap { padding: 18px 20px; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: #666; font-size: 12px; margin: 0 0 14px; line-height: 1.6; }
+  #status { font-size: 13px; color: #444; margin-bottom: 12px; min-height: 20px; }
+  #status.err { color: #b3261e; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .source { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 8px; cursor: pointer; text-align: left; font-family: inherit; }
+  .source:hover { border-color: #111; }
+  .source img { width: 100%; display: block; border-radius: 4px; background: #eee; }
+  .source .name { font-size: 13px; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .source .kind { font-size: 11px; color: #888; }
+  #preview { display: none; }
+  #preview img { max-width: 100%; max-height: 62vh; display: block; margin: 0 auto; border: 1px solid #e3e3e3; border-radius: 8px; background: #fff; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>截屏</h1>
+  <p class="sub">选一个屏幕或窗口截取。截图只会显示在这里，不会自动上传；点“复制到剪贴板”后粘贴进聊天，就能发给 Edison。</p>
+  <div id="status">正在列出屏幕和窗口…</div>
+
+  <div id="picker"><div class="grid" id="grid"></div></div>
+
+  <div id="preview">
+    <img id="shot" alt="截图预览">
+    <div class="btns">
+      <button id="copyBtn" type="button" class="primary">复制到剪贴板</button>
+      <button id="saveBtn" type="button">保存为文件…</button>
+      <button id="againBtn" type="button">重新选择</button>
+      <button id="closeBtn" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  let current = null; // { dataUrl, name }
+
+  const setStatus = (msg, isErr) => {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle('err', !!isErr);
+  };
+
+  function defaultFileName() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return 'screenshot-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.png';
+  }
+
+  async function listSources() {
+    setStatus('正在列出屏幕和窗口…');
+    $('picker').style.display = 'block';
+    $('preview').style.display = 'none';
+    try {
+      const sources = await window.museCapture.listSources();
+      const grid = $('grid');
+      grid.innerHTML = '';
+      if (!sources || sources.length === 0) {
+        setStatus('没有找到可以截取的屏幕或窗口。', true);
+        return;
+      }
+      setStatus('点一个开始截取。');
+      sources.forEach((s) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'source';
+        const img = document.createElement('img');
+        img.src = s.thumb;
+        img.alt = s.name;
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = s.name;
+        const kind = document.createElement('div');
+        kind.className = 'kind';
+        kind.textContent = s.kind === 'screen' ? '屏幕' : '窗口';
+        btn.appendChild(img);
+        btn.appendChild(name);
+        btn.appendChild(kind);
+        btn.addEventListener('click', () => takeShot(s));
+        grid.appendChild(btn);
+      });
+    } catch (e) {
+      setStatus('列出屏幕和窗口失败：' + e.message, true);
+    }
+  }
+
+  async function takeShot(source) {
+    setStatus('正在截取“' + source.name + '”…');
+    try {
+      const shot = await window.museCapture.take(source.id);
+      if (!shot || !shot.dataUrl) {
+        setStatus('截取失败，请重试。', true);
+        return;
+      }
+      current = shot;
+      $('shot').src = shot.dataUrl;
+      $('picker').style.display = 'none';
+      $('preview').style.display = 'block';
+      setStatus('已截取“' + shot.name + '”（' + shot.width + '×' + shot.height + '）。');
+    } catch (e) {
+      setStatus('截取失败：' + e.message, true);
+    }
+  }
+
+  $('copyBtn').addEventListener('click', async () => {
+    if (!current) return;
+    try {
+      const ok = await window.museCapture.copyImage(current.dataUrl);
+      setStatus(ok ? '已复制到剪贴板，粘贴进聊天即可发给 Edison。' : '复制失败，请重试。', !ok);
+    } catch (e) { setStatus('复制失败：' + e.message, true); }
+  });
+  $('saveBtn').addEventListener('click', async () => {
+    if (!current) return;
+    try {
+      const r = await window.museCapture.saveImage(current.dataUrl, defaultFileName());
+      if (r && r.ok) setStatus('已保存到：' + r.filePath);
+      else if (r && r.reason !== 'cancelled') setStatus('保存失败：' + (r.reason || '未知错误'), true);
+    } catch (e) { setStatus('保存失败：' + e.message, true); }
+  });
+  $('againBtn').addEventListener('click', () => { current = null; listSources(); });
+  $('closeBtn').addEventListener('click', () => window.museCapture.close());
+
+  listSources();
+})();
+</script>
+</body>
+</html>

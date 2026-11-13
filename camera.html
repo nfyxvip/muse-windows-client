@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>拍照 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; }
+  .wrap { padding: 18px 20px; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: #666; font-size: 12px; margin: 0 0 14px; line-height: 1.6; }
+  #status { font-size: 13px; color: #444; margin-bottom: 12px; min-height: 20px; }
+  #status.err { color: #b3261e; }
+  video, #photo { width: 100%; display: block; border: 1px solid #e3e3e3; border-radius: 8px; background: #000; }
+  #photo { display: none; background: #fff; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>拍照</h1>
+  <p class="sub">点“拍照”才拍一张，不会录像。照片只会显示在这里，不会自动上传；点“复制到剪贴板”后粘贴进聊天，就能发给 Edison。</p>
+  <div id="status">正在打开摄像头…</div>
+  <video id="video" autoplay playsinline muted></video>
+  <img id="photo" alt="照片预览">
+  <div class="btns">
+    <button id="shootBtn" type="button" class="primary">拍照</button>
+    <button id="copyBtn" type="button" style="display:none">复制到剪贴板</button>
+    <button id="saveBtn" type="button" style="display:none">保存为文件…</button>
+    <button id="retakeBtn" type="button" style="display:none">重拍</button>
+    <button id="closeBtn" type="button">关闭</button>
+  </div>
+</div>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  const video = $('video');
+  const photo = $('photo');
+  let stream = null;
+  let currentDataUrl = null;
+
+  const setStatus = (msg, isErr) => {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle('err', !!isErr);
+  };
+
+  function stopStream() {
+    if (stream) {
+      stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+      stream = null;
+    }
+  }
+
+  function defaultFileName() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return 'photo-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.png';
+  }
+
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('当前环境不支持摄像头。', true);
+      $('shootBtn').disabled = true;
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      video.srcObject = stream;
+      setStatus('摄像头已打开，点“拍照”。');
+    } catch (e) {
+      const name = (e && e.name) || '';
+      if (name === 'NotAllowedError') {
+        setStatus('摄像头权限被拒绝。请在 Windows 设置 → 隐私和安全性 → 相机里允许本应用，或在客户端设置 → 权限里打开相机。', true);
+      } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+        setStatus('找不到摄像头，请检查摄像头是否已连接并被 Windows 识别。', true);
+      } else {
+        setStatus('打开摄像头失败：' + (e && e.message ? e.message : name), true);
+      }
+      $('shootBtn').disabled = true;
+    }
+  }
+
+  $('shootBtn').addEventListener('click', () => {
+    if (!stream || !video.videoWidth) { setStatus('摄像头还没就绪，请稍等再试。', true); return; }
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    currentDataUrl = canvas.toDataURL('image/png');
+    photo.src = currentDataUrl;
+    video.style.display = 'none';
+    photo.style.display = 'block';
+    $('shootBtn').style.display = 'none';
+    $('copyBtn').style.display = '';
+    $('saveBtn').style.display = '';
+    $('retakeBtn').style.display = '';
+    setStatus('已拍好（' + canvas.width + '×' + canvas.height + '）。');
+  });
+  $('copyBtn').addEventListener('click', async () => {
+    if (!currentDataUrl) return;
+    try {
+      const ok = await window.museCamera.copyImage(currentDataUrl);
+      setStatus(ok ? '已复制到剪贴板，粘贴进聊天即可发给 Edison。' : '复制失败，请重试。', !ok);
+    } catch (e) { setStatus('复制失败：' + e.message, true); }
+  });
+  $('saveBtn').addEventListener('click', async () => {
+    if (!currentDataUrl) return;
+    try {
+      const r = await window.museCamera.saveImage(currentDataUrl, defaultFileName());
+      if (r && r.ok) setStatus('已保存到：' + r.filePath);
+      else if (r && r.reason !== 'cancelled') setStatus('保存失败：' + (r.reason || '未知错误'), true);
+    } catch (e) { setStatus('保存失败：' + e.message, true); }
+  });
+  $('retakeBtn').addEventListener('click', () => {
+    currentDataUrl = null;
+    photo.style.display = 'none';
+    video.style.display = 'block';
+    $('shootBtn').style.display = '';
+    $('copyBtn').style.display = 'none';
+    $('saveBtn').style.display = 'none';
+    $('retakeBtn').style.display = 'none';
+    setStatus('摄像头已打开，点“拍照”。');
+  });
+  $('closeBtn').addEventListener('click', () => { stopStream(); window.museCamera.close(); });
+  window.addEventListener('beforeunload', stopStream);
+
+  startCamera();
+})();
+</script>
+</body>
+</html>

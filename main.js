@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.5.0).
+ * Muse Windows Client — a simple unofficial wrapper (v0.6.0).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -50,6 +50,18 @@
  * - Microphone permission is gated by a setting, for both the web
  *   page and the dictation window.
  *
+ * Phase 5 (v0.6.0):
+ * - Screenshot: pick a screen or a window, preview it, then copy it
+ *   to the clipboard (paste into the chat) or save it as a PNG.
+ * - Camera: a small window with a live preview; take a photo, then
+ *   copy it to the clipboard or save it.
+ * - Local automation, strictly bounded: only four whitelisted
+ *   actions (Notepad, Calculator, File Explorer, default browser),
+ *   each toggled in Settings and confirmed on every single use.
+ *   No remote triggering, no background control, no key/mouse
+ *   recording. All three permissions default OFF and ask for
+ *   confirmation on first use.
+ *
  * Safety notes:
  * - The web page runs sandboxed, with Node integration off and
  *   context isolation on. The preload script exposes nothing except
@@ -63,7 +75,7 @@
  */
 'use strict';
 
-const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dialog, screen, ipcMain, Notification, session, clipboard } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dialog, screen, ipcMain, Notification, session, clipboard, desktopCapturer } = require('electron');
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
 const fs = require('node:fs');
@@ -86,6 +98,8 @@ let mainWindow = null;
 let settingsWindow = null;
 let quickChatWindow = null;
 let dictationWindow = null;
+let captureWindow = null;
+let cameraWindow = null;
 let floatingWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -93,6 +107,7 @@ let isQuitting = false;
 let toggleShortcutStatus = 'disabled';
 let quickChatShortcutStatus = 'disabled';
 let dictationShortcutStatus = 'disabled';
+let screenshotShortcutStatus = 'disabled';
 let updateCheckInFlight = false;
 
 // electron-updater is optional at runtime: if it cannot be loaded,
@@ -533,6 +548,259 @@ function toggleDictation() {
   }
 }
 
+// --- Phase 5 permissions: first-use confirmation ----------------------
+// Screenshot, camera and automation each default OFF and ask once,
+// the first time they are used, what they do and what they never do.
+
+const PERMISSION_INFO = {
+  screenshot: {
+    title: '使用截屏？',
+    detail:
+      '截屏会读取你选中的屏幕或窗口画面，显示在预览窗口里。\n\n' +
+      '会做的：把截图复制到剪贴板（你粘贴进聊天），或按你的选择保存为 PNG 文件。\n' +
+      '不会做的：不会自动上传、不会后台偷偷截屏、不会读取其他窗口。',
+  },
+  camera: {
+    title: '使用相机？',
+    detail:
+      '相机会打开摄像头实时预览，点“拍照”才拍一张。\n\n' +
+      '会做的：把照片复制到剪贴板（你粘贴进聊天），或按你的选择保存为 PNG 文件。\n' +
+      '不会做的：不会录像、不会在后台打开摄像头、不会自动上传。',
+  },
+  automation: {
+    title: '使用本地操作？',
+    detail:
+      '本地操作只能打开白名单里的几个程序（记事本、计算器、文件资源管理器、默认浏览器），每次执行前都会再问你一次。\n\n' +
+      '会做的：只在你点了“执行”后，打开你选的那一个程序。\n' +
+      '不会做的：不会远程触发、不会后台静默控制、不会记录键盘鼠标。',
+  },
+};
+
+/** Returns true when the user confirmed (or had confirmed before). */
+async function confirmPermissionOnce(kind) {
+  const confirmed = config.get('confirmedPermissions') || [];
+  if (confirmed.includes(kind)) return true;
+  const info = PERMISSION_INFO[kind];
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    title: info.title,
+    message: info.title,
+    detail: info.detail,
+    buttons: ['我知道了，继续', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  config.update({ confirmedPermissions: [...confirmed, kind] });
+  return true;
+}
+
+function permissionOffNotice(kind, settingName) {
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '功能未开启',
+    message: '这个功能还没有开启',
+    detail: `请先在设置 → 权限里打开“${settingName}”。`,
+  }).catch(() => {});
+}
+
+// --- Screenshot -------------------------------------------------------
+// Pick a screen or a window, preview it, then copy to the clipboard
+// (paste into the chat) or save it as a PNG file.
+
+function createCaptureWindow() {
+  if (captureWindow && !captureWindow.isDestroyed()) {
+    captureWindow.focus();
+    return captureWindow;
+  }
+  captureWindow = new BrowserWindow({
+    width: 720,
+    height: 560,
+    minWidth: 560,
+    minHeight: 420,
+    title: '截屏 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'capture-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  captureWindow.setMenu(null);
+  captureWindow.loadFile(path.join(__dirname, 'capture.html'));
+  captureWindow.once('ready-to-show', () => {
+    captureWindow.show();
+    captureWindow.focus();
+  });
+  captureWindow.on('closed', () => {
+    captureWindow = null;
+  });
+  return captureWindow;
+}
+
+async function openCaptureWindow() {
+  if (!config.get('screenshotEnabled')) {
+    permissionOffNotice('screenshot', '截屏');
+    return;
+  }
+  if (!(await confirmPermissionOnce('screenshot'))) return;
+  createCaptureWindow();
+}
+
+async function listCaptureSources() {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen', 'window'],
+    thumbnailSize: { width: 320, height: 200 },
+    fetchWindowIcons: false,
+  });
+  return sources
+    .filter((s) => s.name && s.name !== 'Muse' && !s.name.startsWith('截屏'))
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      kind: s.id.startsWith('screen:') ? 'screen' : 'window',
+      thumb: s.thumbnail.toDataURL(),
+    }));
+}
+
+async function captureSource(sourceId) {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen', 'window'],
+    thumbnailSize: { width: 1920, height: 1080 },
+    fetchWindowIcons: false,
+  });
+  const source = sources.find((s) => s.id === sourceId);
+  if (!source) return null;
+  return {
+    id: source.id,
+    name: source.name,
+    dataUrl: source.thumbnail.toDataURL(),
+    width: source.thumbnail.getSize().width,
+    height: source.thumbnail.getSize().height,
+  };
+}
+
+// --- Camera -----------------------------------------------------------
+
+function createCameraWindow() {
+  if (cameraWindow && !cameraWindow.isDestroyed()) {
+    cameraWindow.focus();
+    return cameraWindow;
+  }
+  cameraWindow = new BrowserWindow({
+    width: 560,
+    height: 620,
+    minWidth: 420,
+    minHeight: 480,
+    title: '拍照 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'camera-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  });
+  cameraWindow.setMenu(null);
+  cameraWindow.loadFile(path.join(__dirname, 'camera.html'));
+  cameraWindow.once('ready-to-show', () => {
+    cameraWindow.show();
+    cameraWindow.focus();
+  });
+  cameraWindow.on('closed', () => {
+    cameraWindow = null;
+  });
+  return cameraWindow;
+}
+
+async function openCameraWindow() {
+  if (!config.get('cameraEnabled')) {
+    permissionOffNotice('camera', '相机');
+    return;
+  }
+  if (!(await confirmPermissionOnce('camera'))) return;
+  createCameraWindow();
+}
+
+// --- Local automation (strictly bounded) ------------------------------
+// Only four whitelisted actions. Each one needs its own switch in
+// Settings AND a confirmation dialog on every single use. Nothing
+// else can run, and nothing runs in the background.
+
+const AUTOMATION_ACTIONS = {
+  notepad: { label: '记事本', setting: 'automationAllowNotepad', target: 'C:\\Windows\\System32\\notepad.exe' },
+  calculator: { label: '计算器', setting: 'automationAllowCalculator', target: 'C:\\Windows\\System32\\calc.exe' },
+  browser: { label: '默认浏览器（打开 muse.ai）', setting: 'automationAllowBrowser', target: null },
+};
+
+/** Pure gate check, used by the menu, the tray and the smoke tests. */
+function canAutomate(action) {
+  if (action !== 'explorer' && !AUTOMATION_ACTIONS[action]) {
+    return { ok: false, reason: 'unknown-action' };
+  }
+  if (process.platform !== 'win32') return { ok: false, reason: 'unsupported-platform' };
+  if (!config.get('automationEnabled')) return { ok: false, reason: 'disabled' };
+  if (action === 'explorer') {
+    if (!config.get('automationAllowExplorer')) return { ok: false, reason: 'not-whitelisted' };
+    return { ok: true };
+  }
+  const def = AUTOMATION_ACTIONS[action];
+  if (!config.get(def.setting)) return { ok: false, reason: 'not-whitelisted' };
+  return { ok: true };
+}
+
+async function runAutomation(action) {
+  const gate = canAutomate(action);
+  if (!gate.ok) {
+    const detail = gate.reason === 'unsupported-platform'
+      ? '本地操作目前只支持 Windows。'
+      : gate.reason === 'disabled'
+        ? '请先在设置 → 权限里打开“本地操作”。'
+        : '这个操作不在白名单里。请先在设置 → 权限 → 本地操作白名单里勾选它。';
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '无法执行本地操作',
+      message: '这个本地操作现在不能执行',
+      detail,
+    }).catch(() => {});
+    return { ok: false, reason: gate.reason };
+  }
+  if (!(await confirmPermissionOnce('automation'))) return { ok: false, reason: 'cancelled' };
+  const label = action === 'explorer' ? '文件资源管理器' : AUTOMATION_ACTIONS[action].label;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    title: '执行本地操作？',
+    message: `将要打开${label}`,
+    detail: '这是本地操作，只会在你点了“执行”后打开这一个程序，不会做别的事。',
+    buttons: ['执行', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return { ok: false, reason: 'cancelled' };
+  try {
+    if (action === 'explorer') {
+      const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+        title: '选择要在文件资源管理器中打开的文件夹',
+        properties: ['openDirectory'],
+      });
+      if (canceled || !filePaths || filePaths.length === 0) return { ok: false, reason: 'cancelled' };
+      await shell.openPath(filePaths[0]);
+    } else if (action === 'browser') {
+      await shell.openExternal(MUSE_URL);
+    } else {
+      const err = await shell.openPath(AUTOMATION_ACTIONS[action].target);
+      if (err) throw new Error(err);
+    }
+    return { ok: true };
+  } catch (err) {
+    dialog.showErrorBox('打开失败', `打开${label}失败：${err && err.message ? err.message : String(err)}`);
+    return { ok: false, reason: 'failed' };
+  }
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -845,11 +1113,19 @@ function notify(title, body) {
  * same way for both the web page and the dictation window.
  */
 function wirePermissionHandlers() {
-  const handler = (webContents, permission, callback) => {
+  const handler = (webContents, permission, callback, details) => {
     if (permission === 'notifications') {
       callback(!!config.get('notificationsEnabled'));
     } else if (permission === 'media') {
-      callback(!!config.get('microphoneEnabled'));
+      // Electron reports which media kinds were requested, when it can.
+      const types = (details && details.mediaTypes) || [];
+      if (types.length > 0) {
+        const audioOk = !types.includes('audio') || !!config.get('microphoneEnabled');
+        const videoOk = !types.includes('video') || !!config.get('cameraEnabled');
+        callback(audioOk && videoOk);
+      } else {
+        callback(!!config.get('microphoneEnabled') || !!config.get('cameraEnabled'));
+      }
     } else {
       callback(true);
     }
@@ -860,9 +1136,16 @@ function wirePermissionHandlers() {
     console.warn('Could not wire permission handler for muse session:', err.message);
   }
   try {
-    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
       if (permission === 'media') {
-        callback(!!config.get('microphoneEnabled'));
+        const types = (details && details.mediaTypes) || [];
+        if (types.length > 0) {
+          const audioOk = !types.includes('audio') || !!config.get('microphoneEnabled');
+          const videoOk = !types.includes('video') || !!config.get('cameraEnabled');
+          callback(audioOk && videoOk);
+        } else {
+          callback(!!config.get('microphoneEnabled') || !!config.get('cameraEnabled'));
+        }
       } else {
         callback(true);
       }
@@ -940,6 +1223,16 @@ function registerShortcuts() {
     } else {
       dictationShortcutStatus = 'failed';
       reportShortcutFailure('听写', accelerator);
+    }
+  }
+
+  if (config.get('screenshotEnabled')) {
+    const accelerator = config.get('screenshotShortcut') || 'CommandOrControl+Alt+S';
+    if (registerOneShortcut(accelerator, openCaptureWindow)) {
+      screenshotShortcutStatus = 'ok';
+    } else {
+      screenshotShortcutStatus = 'failed';
+      reportShortcutFailure('截屏', accelerator);
     }
   }
 
@@ -1068,6 +1361,17 @@ function buildMenu() {
         { type: 'separator' },
         { label: quickChatLabel, click: () => toggleQuickChat() },
         { label: `听写 (${describeShortcut(config.get('dictationShortcut'))})`, click: () => toggleDictation() },
+        { label: `截屏 (${describeShortcut(config.get('screenshotShortcut'))})`, click: () => openCaptureWindow() },
+        { label: '拍照', click: () => openCameraWindow() },
+        {
+          label: '本地操作',
+          submenu: [
+            { label: '打开记事本', click: () => runAutomation('notepad') },
+            { label: '打开计算器', click: () => runAutomation('calculator') },
+            { label: '打开文件夹…', click: () => runAutomation('explorer') },
+            { label: '在浏览器中打开 muse.ai', click: () => runAutomation('browser') },
+          ],
+        },
         {
           label: '悬浮按钮',
           type: 'checkbox',
@@ -1159,6 +1463,8 @@ function buildTrayMenu() {
     { label: '显示 / 隐藏窗口', click: toggleWindow },
     { label: 'Quick chat', click: () => toggleQuickChat() },
     { label: '听写', click: () => toggleDictation() },
+    { label: '截屏', click: () => openCaptureWindow() },
+    { label: '拍照', click: () => openCameraWindow() },
     { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
@@ -1307,7 +1613,7 @@ app.on('window-all-closed', (event) => {
 ipcMain.handle('settings-get', () => ({
   ...config.load(),
   version: app.getVersion(),
-  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus },
+  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus },
 }));
 ipcMain.handle('settings-set', (event, partial) => {
   const next = config.update(partial || {});
@@ -1319,7 +1625,9 @@ ipcMain.handle('settings-set', (event, partial) => {
     Object.prototype.hasOwnProperty.call(p, 'quickChatEnabled') ||
     Object.prototype.hasOwnProperty.call(p, 'quickChatShortcut') ||
     Object.prototype.hasOwnProperty.call(p, 'dictationEnabled') ||
-    Object.prototype.hasOwnProperty.call(p, 'dictationShortcut')
+    Object.prototype.hasOwnProperty.call(p, 'dictationShortcut') ||
+    Object.prototype.hasOwnProperty.call(p, 'screenshotEnabled') ||
+    Object.prototype.hasOwnProperty.call(p, 'screenshotShortcut')
   ) {
     registerShortcuts();
   }
@@ -1329,7 +1637,7 @@ ipcMain.handle('settings-set', (event, partial) => {
   buildMenu();
   return {
     ...next,
-    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus },
+    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus },
   };
 });
 ipcMain.handle('check-updates', () => {
@@ -1407,6 +1715,62 @@ ipcMain.on('dictation-close', () => {
   if (dictationWindow && !dictationWindow.isDestroyed()) dictationWindow.hide();
 });
 
+// Screenshot / camera IPC (used by capture-preload.js / camera-preload.js).
+ipcMain.handle('capture-list-sources', async () => {
+  try {
+    return await listCaptureSources();
+  } catch (err) {
+    console.warn('Could not list capture sources:', err.message);
+    return [];
+  }
+});
+ipcMain.handle('capture-take', async (event, sourceId) => {
+  try {
+    return await captureSource(sourceId);
+  } catch (err) {
+    console.warn('Could not capture source:', err.message);
+    return null;
+  }
+});
+ipcMain.handle('image-copy', (event, dataUrl) => {
+  try {
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return false;
+    const image = nativeImage.createFromDataURL(dataUrl);
+    if (image.isEmpty()) return false;
+    clipboard.writeImage(image);
+    notify('图片已准备好', '已复制到剪贴板，粘贴进聊天即可发给 Edison。');
+    return true;
+  } catch (err) {
+    console.warn('Could not copy image:', err.message);
+    return false;
+  }
+});
+ipcMain.handle('image-save', async (event, dataUrl, defaultName) => {
+  try {
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return { ok: false };
+    const parent = captureWindow && !captureWindow.isDestroyed() ? captureWindow
+      : cameraWindow && !cameraWindow.isDestroyed() ? cameraWindow : undefined;
+    const { canceled, filePath } = await dialog.showSaveDialog(parent, {
+      title: '保存图片',
+      defaultPath: defaultName || 'muse-capture.png',
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+    });
+    if (canceled || !filePath) return { ok: false, reason: 'cancelled' };
+    const base64 = dataUrl.split(',')[1] || '';
+    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+    return { ok: true, filePath };
+  } catch (err) {
+    console.warn('Could not save image:', err.message);
+    return { ok: false, reason: String(err && err.message ? err.message : err) };
+  }
+});
+ipcMain.on('capture-close', () => {
+  if (captureWindow && !captureWindow.isDestroyed()) captureWindow.close();
+});
+ipcMain.on('camera-close', () => {
+  if (cameraWindow && !cameraWindow.isDestroyed()) cameraWindow.close();
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -1414,6 +1778,11 @@ module.exports = {
   toggleQuickChat,
   createDictationWindow,
   toggleDictation,
+  createCaptureWindow,
+  createCameraWindow,
+  listCaptureSources,
+  captureSource,
+  canAutomate,
   createFloatingWindow,
   destroyFloatingWindow,
   applyFloatingButton,
