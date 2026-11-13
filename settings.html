@@ -88,7 +88,7 @@
     <h2>权限</h2>
     <p class="hint" style="margin:0 0 8px">这三项默认全部关闭，第一次使用时会再弹窗说明、请你确认。</p>
     <label class="row"><input type="checkbox" id="screenshotEnabled"> 截屏（选择屏幕或窗口，复制或保存）</label>
-    <div class="field"><span>截屏快捷键：</span><input type="text" id="screenshotShortcut" spellcheck="false"></div>
+    <div class="field"><span>框选区域：</span><input type="text" id="screenshotShortcut" spellcheck="false"></div>
     <label class="row"><input type="checkbox" id="cameraEnabled"> 相机（拍照，复制或保存）</label>
     <label class="row"><input type="checkbox" id="automationEnabled"> 本地操作（只开白名单里的程序，每次都要确认）</label>
     <h3 style="font-size:13px;margin:14px 0 6px">本地操作白名单（只允许这几个，其他程序一律打不开）</h3>
@@ -147,7 +147,7 @@
     if (st.toggle === 'failed') problems.push('主窗口快捷键（' + (s.toggleShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.quickChat === 'failed') problems.push('Quick chat 快捷键（' + (s.quickChatShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.dictation === 'failed') problems.push('听写快捷键（' + (s.dictationShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
-    if (st.screenshot === 'failed') problems.push('截屏快捷键（' + (s.screenshotShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
+    if (st.screenshot === 'failed') problems.push('框选区域快捷键（' + (s.screenshotShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.search === 'failed') problems.push('文件名搜索快捷键（' + (s.searchShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (problems.length) {
       warn.textContent = problems.join(' ');

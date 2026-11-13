@@ -1,5 +1,5 @@
 /**
- * Muse Windows Client — a simple unofficial wrapper (v0.7.0).
+ * Muse Windows Client — a simple unofficial wrapper (v0.7.1).
  *
  * This app only opens the Muse web app (https://muse.ai) in a desktop
  * window. It is NOT an official Muse client, and it does not add any
@@ -67,6 +67,13 @@
  * exact X / Y / width / height inputs in the preview to re-crop
  * the last capture to a precise size.
  *
+ * v0.7.1 changes the region flow from user feedback: the screenshot
+ * shortcut now goes straight into region selection (crosshair
+ * cursor, no picker in between). After dragging, a small
+ * Copy / Save toolbar appears at the bottom-right of the selected
+ * region; double-clicking inside the region (or pressing Enter)
+ * copies it straight to the clipboard.
+ *
  * Phase 6 (v0.7.0):
  * - Cloud service entries: a "Connect" window that jumps to the
  *   services' web apps (Muse, Gmail, Outlook, Google Calendar,
@@ -121,6 +128,8 @@ let dictationWindow = null;
 let captureWindow = null;
 let cameraWindow = null;
 let regionWindow = null;
+let regionOrigin = 'shortcut'; // 'shortcut' (toolbar flow) | 'picker' (preview flow)
+let lastRegionShot = null; // { image: nativeImage, width, height, rect } — cropped region
 let searchWindow = null;
 let connectWindow = null;
 let lastFullCapture = null; // { image: nativeImage, rect: {x,y,width,height} in image pixels }
@@ -789,13 +798,76 @@ function createRegionWindow() {
   return regionWindow;
 }
 
-async function startRegionCapture() {
+async function startRegionCapture(origin = 'shortcut') {
   if (!config.get('screenshotEnabled')) {
     permissionOffNotice('screenshot', '截屏');
     return;
   }
   if (!(await confirmPermissionOnce('screenshot'))) return;
+  regionOrigin = origin;
   createRegionWindow();
+}
+
+function defaultScreenshotName() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return 'screenshot-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.png';
+}
+
+/**
+ * Shared by both region flows. Captures the region, then either
+ * shows the Copy/Save toolbar in the overlay (shortcut flow) or
+ * hands the shot to the capture window's preview (picker flow).
+ */
+async function onRegionSelected(rect) {
+  const shot = await captureRegion(rect);
+  if (!shot) {
+    notify('截屏', '区域截取失败，请重试。');
+    return null;
+  }
+  lastRegionShot = {
+    image: lastFullCapture.image.crop(lastFullCapture.rect),
+    width: shot.width,
+    height: shot.height,
+    rect: shot.rect,
+  };
+  if (regionOrigin === 'picker') {
+    if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
+    if (captureWindow && !captureWindow.isDestroyed()) {
+      captureWindow.webContents.send('region-shot', shot);
+      captureWindow.focus();
+    }
+  } else if (regionWindow && !regionWindow.isDestroyed()) {
+    regionWindow.webContents.send('region-captured', { width: shot.width, height: shot.height });
+  }
+  return shot;
+}
+
+/** Copy the last captured region straight to the clipboard. */
+function copyRegionShot() {
+  if (!lastRegionShot) return false;
+  clipboard.writeImage(lastRegionShot.image);
+  lastRegionShot = null;
+  notify('截图已准备好', '已复制到剪贴板，粘贴进聊天即可发给 Edison。');
+  if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
+  return true;
+}
+
+/** Save the last captured region as a PNG file. */
+async function saveRegionShot() {
+  if (!lastRegionShot) return { ok: false };
+  const parent = regionWindow && !regionWindow.isDestroyed() ? regionWindow : undefined;
+  const { canceled, filePath } = await dialog.showSaveDialog(parent, {
+    title: '保存截图',
+    defaultPath: defaultScreenshotName(),
+    filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+  });
+  if (canceled || !filePath) return { ok: false, reason: 'cancelled' };
+  fs.writeFileSync(filePath, lastRegionShot.image.toPNG());
+  lastRegionShot = null;
+  if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
+  notify('截图已保存', filePath);
+  return { ok: true, filePath };
 }
 
 /** Capture a region given in DIP coordinates on the primary display. */
@@ -1548,11 +1620,11 @@ function registerShortcuts() {
 
   if (config.get('screenshotEnabled')) {
     const accelerator = config.get('screenshotShortcut') || 'CommandOrControl+Alt+S';
-    if (registerOneShortcut(accelerator, openCaptureWindow)) {
+    if (registerOneShortcut(accelerator, () => startRegionCapture('shortcut'))) {
       screenshotShortcutStatus = 'ok';
     } else {
       screenshotShortcutStatus = 'failed';
-      reportShortcutFailure('截屏', accelerator);
+      reportShortcutFailure('框选区域', accelerator);
     }
   }
 
@@ -1691,7 +1763,8 @@ function buildMenu() {
         { type: 'separator' },
         { label: quickChatLabel, click: () => toggleQuickChat() },
         { label: `听写 (${describeShortcut(config.get('dictationShortcut'))})`, click: () => toggleDictation() },
-        { label: `截屏 (${describeShortcut(config.get('screenshotShortcut'))})`, click: () => openCaptureWindow() },
+        { label: `框选区域 (${describeShortcut(config.get('screenshotShortcut'))})`, click: () => startRegionCapture('shortcut') },
+        { label: '截屏…', click: () => openCaptureWindow() },
         { label: '拍照', click: () => openCameraWindow() },
         { label: `文件名搜索 (${describeShortcut(config.get('searchShortcut'))})`, click: () => toggleSearch() },
         { label: '连接云端服务…', click: () => createConnectWindow() },
@@ -1795,6 +1868,7 @@ function buildTrayMenu() {
     { label: '显示 / 隐藏窗口', click: toggleWindow },
     { label: 'Quick chat', click: () => toggleQuickChat() },
     { label: '听写', click: () => toggleDictation() },
+    { label: '框选区域', click: () => startRegionCapture('shortcut') },
     { label: '截屏', click: () => openCaptureWindow() },
     { label: '拍照', click: () => openCameraWindow() },
     { label: '文件名搜索', click: () => toggleSearch() },
@@ -2068,25 +2142,23 @@ ipcMain.handle('capture-take', async (event, sourceId) => {
   }
 });
 ipcMain.handle('region-start', async () => {
-  await startRegionCapture();
+  await startRegionCapture('picker');
   return true;
 });
 ipcMain.on('region-selected', async (event, rect) => {
-  if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
-  try {
-    const shot = await captureRegion(rect);
-    if (shot && captureWindow && !captureWindow.isDestroyed()) {
-      captureWindow.webContents.send('region-shot', shot);
-      captureWindow.focus();
-    } else if (!shot) {
-      notify('截屏', '区域截取失败，请重试。');
-    }
-  } catch (err) {
-    console.warn('Could not capture region:', err.message);
-  }
+  await onRegionSelected(rect);
 });
 ipcMain.on('region-cancel', () => {
   if (regionWindow && !regionWindow.isDestroyed()) regionWindow.close();
+});
+ipcMain.handle('region-copy', async () => copyRegionShot());
+ipcMain.handle('region-save', async () => {
+  try {
+    return await saveRegionShot();
+  } catch (err) {
+    console.warn('Could not save region shot:', err.message);
+    return { ok: false, reason: String(err && err.message ? err.message : err) };
+  }
 });
 ipcMain.handle('capture-recrop', async (event, rect) => {
   try {
@@ -2199,6 +2271,9 @@ module.exports = {
   createCameraWindow,
   createRegionWindow,
   captureRegion,
+  onRegionSelected,
+  copyRegionShot,
+  saveRegionShot,
   recropCapture,
   createSearchWindow,
   createConnectWindow,
