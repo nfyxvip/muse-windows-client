@@ -24,6 +24,22 @@
   .list-empty { color: #888; font-size: 12px; padding: 4px 0; }
   button.mini { font-size: 12px; padding: 3px 10px; }
   button.linklike { border: none; background: none; color: #111; text-decoration: underline; padding: 3px 0; font-size: 13px; text-align: left; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lm-layout { display: flex; gap: 10px; align-items: stretch; }
+  .lm-list { width: 170px; flex: 0 0 170px; background: #f7f7f7; border: 1px solid #e3e3e3; border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .lm-item { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 8px 9px; cursor: pointer; font-size: 13px; color: #1f1f1f; }
+  .lm-item:hover { background: #fff; }
+  .lm-item.sel { background: #fff; border-color: #e3e3e3; }
+  .lm-item .dot { width: 8px; height: 8px; border-radius: 50%; background: #bbb; flex: 0 0 8px; }
+  .lm-item .dot.on { background: #22a06b; }
+  .lm-item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lm-item .tag { font-size: 11px; color: #22a06b; }
+  .lm-form { flex: 1; min-width: 0; }
+  .lm-form .field { padding-left: 0; }
+  .lm-form .field input[type="text"], .lm-form .field input[type="password"], .lm-form .field input[type="number"] { flex: 1; min-width: 0; font-size: 14px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .lm-preview { font-size: 12px; color: #666; background: #f7f7f7; border: 1px solid #e3e3e3; border-radius: 6px; padding: 7px 10px; margin: 4px 0 8px; font-family: Consolas, monospace; word-break: break-all; }
+  .lm-preview b { color: #1f1f1f; }
+  .lm-status { font-size: 12px; color: #22a06b; margin-top: 8px; min-height: 16px; }
+  .lm-status.err { color: #b3261e; }
   button { font-size: 14px; padding: 8px 16px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
   button.primary { background: #111; color: #fff; border-color: #111; }
   button:disabled { opacity: 0.5; cursor: default; }
@@ -50,6 +66,7 @@
     <label class="row"><input type="checkbox" id="quickChatEnabled"> 启用 Quick chat 快捷键（弹出 / 收起小窗口）</label>
     <div class="field"><span>Quick chat：</span><input type="text" id="quickChatShortcut" spellcheck="false"></div>
     <div class="field"><span>文件名搜索：</span><input type="text" id="searchShortcut" spellcheck="false"></div>
+    <div class="field"><span>本地模型：</span><input type="text" id="localModelShortcut" spellcheck="false"></div>
     <p class="hint">格式例如 Ctrl+Alt+M、Ctrl+Alt+Q、Ctrl+Shift+K。至少要一个修饰键（Ctrl / Alt / Shift）加一个按键。改完立刻生效。</p>
     <p class="warn" id="shortcutWarn" style="display:none"></p>
   </section>
@@ -97,6 +114,16 @@
     <label class="row"><input type="checkbox" id="automationAllowExplorer"> 文件资源管理器（打开你选的文件夹）</label>
     <label class="row"><input type="checkbox" id="automationAllowBrowser"> 默认浏览器（打开 muse.ai）</label>
     <p class="hint">本地操作不会远程触发、不会后台静默控制、不会记录键盘鼠标。远端控制 Windows 明确不做。</p>
+  </section>
+
+  <section>
+    <h2>本地模型</h2>
+    <p class="hint" style="margin:0 0 10px">连接你自己的模型（llama.cpp / Ollama / LM Studio），走 OpenAI 兼容接口。一次只启用一个；启用的模型会出现在“本地模型”聊天窗口里。muse.ai 仍然走 Meta 的云端。</p>
+    <div class="lm-layout">
+      <div class="lm-list" id="lmList"></div>
+      <div class="lm-form" id="lmForm"></div>
+    </div>
+    <div class="lm-status" id="lmStatus"></div>
   </section>
 
   <section>
@@ -149,6 +176,7 @@
     if (st.dictation === 'failed') problems.push('听写快捷键（' + (s.dictationShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.screenshot === 'failed') problems.push('框选区域快捷键（' + (s.screenshotShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.search === 'failed') problems.push('文件名搜索快捷键（' + (s.searchShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
+    if (st.localModel === 'failed') problems.push('本地模型快捷键（' + (s.localModelShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (problems.length) {
       warn.textContent = problems.join(' ');
       warn.style.display = 'block';
@@ -225,6 +253,235 @@
     renderFolderList($('authorizedList'), s.authorizedFolders || [], 'authorizedFolders', '还没有授权文件夹。');
     renderFolderList($('blockedList'), s.blockedFolders || [], 'blockedFolders', '没有黑名单文件夹。');
     renderRecent(s.recentFiles || []);
+    renderLocalModels(s);
+  }
+
+  // --- Local models (Phase 7, CC Switch style) ---
+  let selectedLocalModelId = null;
+
+  function renderLocalModels(s) {
+    const providers = (s && s.localModels) || [];
+    const activeId = s && s.activeLocalModelId;
+    if (selectedLocalModelId && !providers.some((p) => p.id === selectedLocalModelId)) {
+      selectedLocalModelId = null;
+    }
+    if (!selectedLocalModelId && providers.length) selectedLocalModelId = providers[0].id;
+    const listEl = $('lmList');
+    listEl.innerHTML = '';
+    providers.forEach((p) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'lm-item' + (p.id === selectedLocalModelId ? ' sel' : '');
+      const dot = document.createElement('span');
+      dot.className = 'dot' + (p.id === activeId ? ' on' : '');
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = p.name;
+      btn.appendChild(dot);
+      btn.appendChild(nm);
+      if (p.id === activeId) {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = '已启用';
+        btn.appendChild(tag);
+      }
+      btn.addEventListener('click', () => {
+        selectedLocalModelId = p.id;
+        renderLocalModels(currentSettings);
+      });
+      listEl.appendChild(btn);
+    });
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'mini';
+    addBtn.textContent = '+ 添加模型';
+    addBtn.style.marginTop = 'auto';
+    addBtn.addEventListener('click', async () => {
+      const next = [...(currentSettings.localModels || [])];
+      const p = {
+        id: 'lm-' + Date.now().toString(36),
+        name: 'llama.cpp · 本地',
+        preset: 'llama.cpp',
+        protocol: 'http',
+        host: '',
+        port: 8080,
+        apiKey: '',
+        model: '',
+      };
+      next.push(p);
+      selectedLocalModelId = p.id;
+      const saved = await save({ localModels: next });
+      if (saved) renderLocalModels(saved);
+    });
+    listEl.appendChild(addBtn);
+
+    const formEl = $('lmForm');
+    formEl.innerHTML = '';
+    const selected = providers.find((p) => p.id === selectedLocalModelId);
+    if (!selected) {
+      const d = document.createElement('div');
+      d.className = 'list-empty';
+      d.textContent = '还没有本地模型，点左侧“+ 添加模型”新建一个。';
+      formEl.appendChild(d);
+      return;
+    }
+    function field(label, control) {
+      const row = document.createElement('div');
+      row.className = 'field';
+      const span = document.createElement('span');
+      span.textContent = label;
+      row.appendChild(span);
+      row.appendChild(control);
+      formEl.appendChild(row);
+      return row;
+    }
+    function textInput(value, placeholder, type) {
+      const inp = document.createElement('input');
+      inp.type = type || 'text';
+      inp.value = value || '';
+      inp.placeholder = placeholder || '';
+      inp.spellcheck = false;
+      return inp;
+    }
+    const nameInp = textInput(selected.name, '名称');
+    field('名称：', nameInp);
+    const presetSel = document.createElement('select');
+    ['llama.cpp', 'Ollama', 'LM Studio', '自定义'].forEach((o) => {
+      const opt = document.createElement('option');
+      opt.value = o;
+      opt.textContent = o;
+      if (selected.preset === o) opt.selected = true;
+      presetSel.appendChild(opt);
+    });
+    field('预设：', presetSel);
+    const addrRow = document.createElement('div');
+    addrRow.className = 'field';
+    const addrLabel = document.createElement('span');
+    addrLabel.textContent = '地址：';
+    const protoSel = document.createElement('select');
+    ['http', 'https'].forEach((o) => {
+      const opt = document.createElement('option');
+      opt.value = o;
+      opt.textContent = o;
+      if (selected.protocol === o) opt.selected = true;
+      protoSel.appendChild(opt);
+    });
+    const hostInp = textInput(selected.host, '如 192.168.1.20 或 100.x.x.x');
+    hostInp.style.flex = '1';
+    const portInp = document.createElement('input');
+    portInp.type = 'number';
+    portInp.min = '1';
+    portInp.max = '65535';
+    portInp.value = selected.port || '';
+    portInp.placeholder = '端口';
+    portInp.style.flex = '0 0 80px';
+    addrRow.appendChild(addrLabel);
+    addrRow.appendChild(protoSel);
+    addrRow.appendChild(hostInp);
+    addrRow.appendChild(portInp);
+    formEl.appendChild(addrRow);
+    const preview = document.createElement('div');
+    preview.className = 'lm-preview';
+    const updatePreview = () => {
+      preview.innerHTML = '';
+      preview.textContent = '完整地址：';
+      const b = document.createElement('b');
+      b.textContent = (protoSel.value || 'http') + '://' + (hostInp.value.trim() || '地址') + ':' + (portInp.value || '端口') + '/v1';
+      preview.appendChild(b);
+    };
+    updatePreview();
+    formEl.appendChild(preview);
+    const keyInp = textInput(selected.apiKey, '留空（llama.cpp 默认不需要）', 'password');
+    field('API Key：', keyInp);
+    const modelInp = textInput(selected.model, '留空则连接后自动拉取');
+    field('模型：', modelInp);
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.style.marginLeft = '0';
+    hint.textContent = '地址和端口按你那台电脑的实际填写；密钥只保存在本机，不会上传。';
+    formEl.appendChild(hint);
+    const btns = document.createElement('div');
+    btns.className = 'btns';
+    const testBtn = document.createElement('button');
+    testBtn.type = 'button';
+    testBtn.textContent = '测试连接';
+    const enableBtn = document.createElement('button');
+    enableBtn.type = 'button';
+    enableBtn.className = 'primary';
+    enableBtn.textContent = selected.id === activeId ? '已启用' : '启用';
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.textContent = '删除';
+    btns.appendChild(testBtn);
+    btns.appendChild(enableBtn);
+    btns.appendChild(delBtn);
+    formEl.appendChild(btns);
+
+    const lmStatus = (msg, isErr) => {
+      const el = $('lmStatus');
+      el.textContent = msg || '';
+      el.classList.toggle('err', !!isErr);
+    };
+    function currentFormProvider() {
+      return {
+        id: selected.id,
+        name: nameInp.value.trim() || selected.preset,
+        preset: presetSel.value,
+        protocol: protoSel.value,
+        host: hostInp.value.trim(),
+        port: Number(portInp.value),
+        apiKey: keyInp.value,
+        model: modelInp.value.trim(),
+      };
+    }
+    async function saveProviders(patch) {
+      const list = (currentSettings.localModels || []).map((p) => (p.id === selected.id ? currentFormProvider() : p));
+      const saved = await save({ localModels: list, ...(patch || {}) });
+      if (saved) renderLocalModels(saved);
+      return saved;
+    }
+    [nameInp, hostInp, portInp, keyInp, modelInp].forEach((inp) => {
+      inp.addEventListener('change', () => saveProviders());
+    });
+    hostInp.addEventListener('input', updatePreview);
+    portInp.addEventListener('input', updatePreview);
+    protoSel.addEventListener('change', () => { updatePreview(); saveProviders(); });
+    presetSel.addEventListener('change', async () => {
+      const defaults = { 'llama.cpp': 8080, Ollama: 11434, 'LM Studio': 1234 };
+      if (defaults[presetSel.value]) portInp.value = defaults[presetSel.value];
+      updatePreview();
+      await saveProviders();
+    });
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      lmStatus('正在测试连接…');
+      try {
+        const res = await window.museSettings.testLocalModel(currentFormProvider());
+        if (res && res.ok) {
+          lmStatus(res.models && res.models.length
+            ? '已连接，发现 ' + res.models.length + ' 个模型：' + res.models.slice(0, 3).join('、') + (res.models.length > 3 ? '…' : '')
+            : '已连接，但服务上没有列出模型。');
+        } else {
+          lmStatus((res && res.error) || '连接失败。', true);
+        }
+      } catch (e) {
+        lmStatus('测试失败：' + e.message, true);
+      }
+      testBtn.disabled = false;
+    });
+    enableBtn.addEventListener('click', async () => {
+      await saveProviders({ activeLocalModelId: selected.id });
+      lmStatus('已启用“' + (nameInp.value.trim() || selected.preset) + '”。本地模型窗口现在用它。');
+    });
+    delBtn.addEventListener('click', async () => {
+      const list = (currentSettings.localModels || []).filter((p) => p.id !== selected.id);
+      selectedLocalModelId = null;
+      const patch = { localModels: list };
+      if (currentSettings.activeLocalModelId === selected.id) patch.activeLocalModelId = null;
+      const saved = await save(patch);
+      if (saved) renderLocalModels(saved);
+      lmStatus('已删除。');
+    });
   }
 
   async function load() {
@@ -237,6 +494,7 @@
       $('quickChatEnabled').checked = !!s.quickChatEnabled;
       $('quickChatShortcut').value = s.quickChatShortcut || '';
       $('searchShortcut').value = s.searchShortcut || '';
+      $('localModelShortcut').value = s.localModelShortcut || '';
       $('floatingButtonEnabled').checked = !!s.floatingButtonEnabled;
       $('notificationsEnabled').checked = !!s.notificationsEnabled;
       $('microphoneEnabled').checked = !!s.microphoneEnabled;
@@ -312,6 +570,16 @@
       if (s.searchShortcut !== typed) {
         e.target.value = s.searchShortcut;
         status('快捷键格式不对，已恢复为 ' + s.searchShortcut + '。');
+      }
+    }
+  });
+  $('localModelShortcut').addEventListener('change', async (e) => {
+    const typed = e.target.value.trim();
+    const s = await save({ localModelShortcut: typed });
+    if (s) {
+      if (s.localModelShortcut !== typed) {
+        e.target.value = s.localModelShortcut;
+        status('快捷键格式不对，已恢复为 ' + s.localModelShortcut + '。');
       }
     }
   });

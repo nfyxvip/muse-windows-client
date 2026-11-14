@@ -90,6 +90,16 @@
  * finishes is queued and runs as soon as it lands. The overlay
  * also gets a ✕ button and slightly lighter dimming.
  *
+ * v0.8.0 adds local models (Phase 7): connect to your own model
+ * server (llama.cpp, Ollama, LM Studio) through an OpenAI-compatible
+ * API. Settings holds several provider profiles, CC Switch style
+ * (preset, protocol, host, port, optional key, model; one active
+ * at a time), and a chat window talks to the active one with
+ * streaming replies. The Muse web app itself still talks to
+ * Meta's cloud; the local model is a separate entry in this
+ * client. API keys, if the user types one, are stored only in the
+ * local config file and only ever sent to the configured endpoint.
+ *
  * Phase 6 (v0.7.0):
  * - Cloud service entries: a "Connect" window that jumps to the
  *   services' web apps (Muse, Gmail, Outlook, Google Calendar,
@@ -135,6 +145,8 @@ const QUICK_CHAT_WIDTH = 480;
 const QUICK_CHAT_HEIGHT = 640;
 const DICTATION_WIDTH = 440;
 const DICTATION_HEIGHT = 560;
+const LOCAL_MODEL_WIDTH = 560;
+const LOCAL_MODEL_HEIGHT = 680;
 const FLOATING_SIZE = 64;
 
 let mainWindow = null;
@@ -148,6 +160,8 @@ let regionOrigin = 'shortcut'; // 'shortcut' (toolbar flow) | 'picker' (preview 
 let lastRegionShot = null; // { image: nativeImage, width, height, rect } — cropped region
 let searchWindow = null;
 let connectWindow = null;
+let localModelWindow = null;
+let localModelStreamAbort = null;
 let lastFullCapture = null; // { image: nativeImage, rect: {x,y,width,height} in image pixels }
 let floatingWindow = null;
 let tray = null;
@@ -158,6 +172,7 @@ let quickChatShortcutStatus = 'disabled';
 let dictationShortcutStatus = 'disabled';
 let screenshotShortcutStatus = 'disabled';
 let searchShortcutStatus = 'disabled';
+let localModelShortcutStatus = 'disabled';
 let updateCheckInFlight = false;
 
 // electron-updater is optional at runtime: if it cannot be loaded,
@@ -1227,6 +1242,230 @@ function toggleSearch() {
   }
 }
 
+// --- Local model chat (Phase 7, v0.8.0) -------------------------------
+// A separate chat window that talks to the user's own model server
+// (llama.cpp, Ollama, LM Studio) through its OpenAI-compatible API.
+// The Muse web app keeps talking to Meta's cloud; this window is
+// the local model's own entry. The endpoint always comes from the
+// stored config (resolved in the main process), never from the
+// renderer, and the API key is only ever sent to that endpoint.
+
+function getActiveLocalModel() {
+  const providers = config.get('localModels') || [];
+  const id = config.get('activeLocalModelId');
+  if (!id) return null;
+  return providers.find((p) => p.id === id) || null;
+}
+
+/** The provider as the renderer may see it: no API key. */
+function publicLocalModel(provider) {
+  if (!provider) return null;
+  return {
+    id: provider.id,
+    name: provider.name,
+    preset: provider.preset,
+    protocol: provider.protocol,
+    host: provider.host,
+    port: provider.port,
+    model: provider.model,
+    baseUrl: config.localModelBaseUrl(provider),
+  };
+}
+
+function friendlyFetchError(err) {
+  const code = (err && err.code) || '';
+  const message = (err && err.message) || '';
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED/.test(message)) return '连不上：服务没开，或地址端口不对。';
+  if (code === 'ENOTFOUND' || /ENOTFOUND/.test(message)) return '找不到这台电脑：地址不对。';
+  if (code === 'ETIMEDOUT' || /timed out|timeout/i.test(message)) return '连接超时：那台电脑可能没开机，或网络不通。';
+  if (err && err.name === 'AbortError') return '连接被取消。';
+  return message ? message.slice(0, 200) : '未知错误。';
+}
+
+/** Probe GET {base}/v1/models. Returns { ok, models } or { ok:false, error }. */
+async function testLocalModelConnection(provider) {
+  const clean = config.sanitizeLocalModel(provider);
+  if (!clean) return { ok: false, error: '模型配置无效，请检查地址和端口。' };
+  const headers = {};
+  if (clean.apiKey) headers.Authorization = 'Bearer ' + clean.apiKey;
+  let res;
+  try {
+    res = await fetch(config.localModelBaseUrl(clean) + '/v1/models', {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (err) {
+    return { ok: false, error: '连接失败：' + friendlyFetchError(err) };
+  }
+  if (!res.ok) {
+    return { ok: false, error: `服务返回了 ${res.status}，请检查地址和端口。` };
+  }
+  try {
+    const json = await res.json();
+    const models = Array.isArray(json.data)
+      ? json.data.map((m) => m && m.id).filter((id) => typeof id === 'string' && id)
+      : [];
+    return { ok: true, models };
+  } catch (_) {
+    return { ok: false, error: '服务返回的内容不是预期的模型列表。' };
+  }
+}
+
+/**
+ * Stream a chat completion from the local model.
+ * callbacks: { onChunk(text), onDone(info), onError(message) }.
+ * Returns { abort() } or null when it never started.
+ */
+async function streamLocalModelChat(provider, messages, callbacks) {
+  const clean = config.sanitizeLocalModel(provider);
+  if (!clean) {
+    callbacks.onError('模型配置无效，请先在设置里检查地址和端口。');
+    return null;
+  }
+  if (localModelStreamAbort) {
+    try { localModelStreamAbort.abort(); } catch (_) { /* already gone */ }
+  }
+  // Resolve the model name: the configured one, or the first one the
+  // server reports when the field was left empty.
+  let model = clean.model;
+  if (!model) {
+    const listed = await testLocalModelConnection(clean);
+    if (listed.ok && listed.models.length) {
+      model = listed.models[0];
+    } else {
+      callbacks.onError('没有填模型名，也没能从服务上拉到模型列表：' + (listed.error || '连接失败'));
+      return null;
+    }
+  }
+  const controller = new AbortController();
+  localModelStreamAbort = controller;
+  const headers = { 'Content-Type': 'application/json' };
+  if (clean.apiKey) headers.Authorization = 'Bearer ' + clean.apiKey;
+  let res;
+  try {
+    res = await fetch(config.localModelBaseUrl(clean) + '/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, messages, stream: true }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      callbacks.onDone({ aborted: true, model });
+      return null;
+    }
+    callbacks.onError('连接本地模型失败：' + friendlyFetchError(err));
+    return null;
+  }
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 200); } catch (_) { /* ignore */ }
+    callbacks.onError(`本地模型返回了 ${res.status}：${detail || res.statusText || '请检查服务状态。'}`);
+    return null;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') {
+          callbacks.onDone({ model });
+          return { abort: () => controller.abort() };
+        }
+        try {
+          const json = JSON.parse(data);
+          const piece = json && json.choices && json.choices[0] && json.choices[0].delta
+            && json.choices[0].delta.content;
+          if (piece) callbacks.onChunk(piece);
+        } catch (_) {
+          // Ignore malformed SSE lines; the stream continues.
+        }
+      }
+    }
+    callbacks.onDone({ model });
+  } catch (err) {
+    if (err.name === 'AbortError') callbacks.onDone({ aborted: true, model });
+    else callbacks.onError('读取回复时断开了：' + friendlyFetchError(err));
+  }
+  return { abort: () => controller.abort() };
+}
+
+function createLocalModelWindow() {
+  if (localModelWindow && !localModelWindow.isDestroyed()) {
+    localModelWindow.show();
+    localModelWindow.focus();
+    return localModelWindow;
+  }
+  const saved = config.get('localModelBounds');
+  const opts = {
+    width: saved ? saved.width : LOCAL_MODEL_WIDTH,
+    height: saved ? saved.height : LOCAL_MODEL_HEIGHT,
+    minWidth: 420,
+    minHeight: 480,
+    title: '本地模型 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'local-model-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  };
+  if (saved) {
+    opts.x = saved.x;
+    opts.y = saved.y;
+  }
+  localModelWindow = new BrowserWindow(opts);
+  localModelWindow.setMenu(null);
+  localModelWindow.loadFile(path.join(__dirname, 'local-model.html'));
+  localModelWindow.once('ready-to-show', () => {
+    localModelWindow.show();
+    localModelWindow.focus();
+  });
+  localModelWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      localModelWindow.hide();
+      event.preventDefault();
+    }
+  });
+  localModelWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      try {
+        config.update({ localModelBounds: localModelWindow.getBounds() });
+      } catch (_) { /* bounds are best-effort */ }
+      localModelWindow.hide();
+    }
+  });
+  localModelWindow.on('closed', () => {
+    localModelWindow = null;
+  });
+  return localModelWindow;
+}
+
+function toggleLocalModel() {
+  if (!localModelWindow || localModelWindow.isDestroyed()) {
+    createLocalModelWindow();
+    return;
+  }
+  if (localModelWindow.isVisible()) {
+    localModelWindow.hide();
+  } else {
+    localModelWindow.show();
+    localModelWindow.focus();
+  }
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -1621,6 +1860,7 @@ function registerShortcuts() {
   globalShortcut.unregisterAll();
   toggleShortcutStatus = 'disabled';
   quickChatShortcutStatus = 'disabled';
+  localModelShortcutStatus = 'disabled';
 
   if (config.get('shortcutEnabled')) {
     const accelerator = config.get('toggleShortcut') || 'CommandOrControl+Alt+M';
@@ -1669,6 +1909,16 @@ function registerShortcuts() {
     } else {
       searchShortcutStatus = 'failed';
       reportShortcutFailure('文件名搜索', accelerator);
+    }
+  }
+
+  {
+    const accelerator = config.get('localModelShortcut') || 'CommandOrControl+Alt+L';
+    if (registerOneShortcut(accelerator, toggleLocalModel)) {
+      localModelShortcutStatus = 'ok';
+    } else {
+      localModelShortcutStatus = 'failed';
+      reportShortcutFailure('本地模型', accelerator);
     }
   }
 
@@ -1801,6 +2051,7 @@ function buildMenu() {
         { label: '截屏…', click: () => openCaptureWindow() },
         { label: '拍照', click: () => openCameraWindow() },
         { label: `文件名搜索 (${describeShortcut(config.get('searchShortcut'))})`, click: () => toggleSearch() },
+        { label: `本地模型 (${describeShortcut(config.get('localModelShortcut'))})`, click: () => toggleLocalModel() },
         { label: '连接云端服务…', click: () => createConnectWindow() },
         {
           label: '本地操作',
@@ -1906,6 +2157,7 @@ function buildTrayMenu() {
     { label: '截屏', click: () => openCaptureWindow() },
     { label: '拍照', click: () => openCameraWindow() },
     { label: '文件名搜索', click: () => toggleSearch() },
+    { label: '本地模型', click: () => toggleLocalModel() },
     { label: '连接云端服务…', click: () => createConnectWindow() },
     { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
@@ -2055,7 +2307,7 @@ app.on('window-all-closed', (event) => {
 ipcMain.handle('settings-get', () => ({
   ...config.load(),
   version: app.getVersion(),
-  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus },
+  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus, localModel: localModelShortcutStatus },
 }));
 ipcMain.handle('settings-set', (event, partial) => {
   const next = config.update(partial || {});
@@ -2070,7 +2322,8 @@ ipcMain.handle('settings-set', (event, partial) => {
     Object.prototype.hasOwnProperty.call(p, 'dictationShortcut') ||
     Object.prototype.hasOwnProperty.call(p, 'screenshotEnabled') ||
     Object.prototype.hasOwnProperty.call(p, 'screenshotShortcut') ||
-    Object.prototype.hasOwnProperty.call(p, 'searchShortcut')
+    Object.prototype.hasOwnProperty.call(p, 'searchShortcut') ||
+    Object.prototype.hasOwnProperty.call(p, 'localModelShortcut')
   ) {
     registerShortcuts();
   }
@@ -2080,7 +2333,7 @@ ipcMain.handle('settings-set', (event, partial) => {
   buildMenu();
   return {
     ...next,
-    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus },
+    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus, localModel: localModelShortcutStatus },
   };
 });
 ipcMain.handle('check-updates', () => {
@@ -2294,6 +2547,50 @@ ipcMain.on('search-close', () => {
   if (searchWindow && !searchWindow.isDestroyed()) searchWindow.hide();
 });
 
+// Local model IPC (used by local-model-preload.js and settings-preload.js).
+// Chat always resolves the endpoint from the stored config by id;
+// only the settings test accepts a provider object, and it is
+// sanitised (bare host, valid port) before any fetch happens.
+ipcMain.handle('local-model:get-active', () => {
+  const p = getActiveLocalModel();
+  return { active: publicLocalModel(p) };
+});
+ipcMain.handle('local-model:test', async (event, provider) => {
+  return testLocalModelConnection(provider);
+});
+ipcMain.handle('local-model:send', async (event, providerId, messages) => {
+  const providers = config.get('localModels') || [];
+  const provider = (typeof providerId === 'string' && providerId
+    ? providers.find((p) => p.id === providerId)
+    : null) || getActiveLocalModel();
+  if (!provider) {
+    return { ok: false, error: '还没有启用本地模型，请先在设置 → 本地模型里添加并启用。' };
+  }
+  const cleanMessages = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'system') && typeof m.content === 'string' && m.content.trim())
+    .map((m) => ({ role: m.role, content: m.content }))
+    .slice(-50);
+  if (!cleanMessages.length) return { ok: false, error: '没有要发送的内容。' };
+  const sender = event.sender;
+  streamLocalModelChat(provider, cleanMessages, {
+    onChunk: (text) => { try { sender.send('local-model:chunk', text); } catch (_) { /* window closed */ } },
+    onDone: (info) => { try { sender.send('local-model:done', info || {}); } catch (_) { /* window closed */ } },
+    onError: (msg) => { try { sender.send('local-model:error', msg); } catch (_) { /* window closed */ } },
+  });
+  return { ok: true };
+});
+ipcMain.on('local-model:abort', () => {
+  if (localModelStreamAbort) {
+    try { localModelStreamAbort.abort(); } catch (_) { /* already gone */ }
+  }
+});
+ipcMain.on('local-model:open-settings', () => {
+  createSettingsWindow();
+});
+ipcMain.on('local-model:close', () => {
+  if (localModelWindow && !localModelWindow.isDestroyed()) localModelWindow.hide();
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -2311,6 +2608,11 @@ module.exports = {
   recropCapture,
   createSearchWindow,
   createConnectWindow,
+  createLocalModelWindow,
+  toggleLocalModel,
+  getActiveLocalModel,
+  testLocalModelConnection,
+  streamLocalModelChat,
   searchFileNames,
   toggleFavoriteFile,
   CLOUD_SERVICES,

@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('museSettings', {
   set: (partial) => ipcRenderer.invoke('settings-set', partial),
   checkForUpdates: () => ipcRenderer.invoke('check-updates'),
   testNotification: () => ipcRenderer.invoke('test-notification'),
+  testLocalModel: (provider) => ipcRenderer.invoke('local-model:test', provider),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   copyRecentFile: (filePath) => ipcRenderer.invoke('copy-recent-file', filePath),
   clearRecent: () => ipcRenderer.invoke('clear-recent'),

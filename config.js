@@ -3,7 +3,11 @@
  *
  * Settings are stored as JSON in the app's userData folder
  * (e.g. %APPDATA%\Muse Windows Client\config.json on Windows).
- * No passwords, tokens, or login data are ever stored here.
+ * No Muse passwords, tokens, or login data are ever stored here.
+ * The one exception is a local-model API key, and only if the user
+ * types one in for their own model server: it is stored in the same
+ * local file, on their own machine, and is only ever sent to the
+ * endpoint they configured. llama.cpp needs no key by default.
  *
  * Defaults are applied for missing / invalid values, so a corrupt
  * or hand-edited config file can never crash the app on startup.
@@ -106,6 +110,67 @@ function sanitizeBounds(raw, minWidth, minHeight) {
   };
 }
 
+// --- Local model providers (Phase 7, CC Switch style) -----------------
+// A provider is one model endpoint: name, preset, protocol, host,
+// port, optional API key, optional model name (empty = auto-detect
+// from /v1/models). The host must be a bare hostname or IP — no
+// scheme, no path, no userinfo — so a crafted value cannot turn the
+// test/chat fetch into a request somewhere else.
+
+const LOCAL_MODEL_PRESETS = ['llama.cpp', 'Ollama', 'LM Studio', '自定义'];
+const LOCAL_MODEL_PRESET_PORTS = { 'llama.cpp': 8080, Ollama: 11434, 'LM Studio': 1234 };
+
+function sanitizeLocalModel(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const preset = LOCAL_MODEL_PRESETS.includes(raw.preset) ? raw.preset : '自定义';
+  const protocol = raw.protocol === 'https' ? 'https' : 'http';
+  const host = typeof raw.host === 'string' ? raw.host.trim().replace(/\/+$/, '') : '';
+  // Bare hostname / IPv4 / IPv6 literal only. Rejects schemes, paths,
+  // userinfo, ports embedded in the host, and anything else.
+  if (!/^(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\])$/.test(host) || host.length > 255) return null;
+  let port = Number(raw.port);
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    port = LOCAL_MODEL_PRESET_PORTS[preset] || 0;
+  }
+  if (!port) return null;
+  const id = typeof raw.id === 'string' && raw.id.trim()
+    ? raw.id.trim().slice(0, 64)
+    : `lm-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffff).toString(16)}`;
+  const name = typeof raw.name === 'string' && raw.name.trim()
+    ? raw.name.trim().slice(0, 80)
+    : preset;
+  return {
+    id,
+    name,
+    preset,
+    protocol,
+    host,
+    port: Math.round(port),
+    apiKey: typeof raw.apiKey === 'string' ? raw.apiKey.slice(0, 500) : '',
+    model: typeof raw.model === 'string' ? raw.model.trim().slice(0, 200) : '',
+  };
+}
+
+function sanitizeLocalModels(raw, max) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const p = sanitizeLocalModel(item);
+    if (!p) continue;
+    if (seen.has(p.id)) continue;
+    seen.add(p.id);
+    out.push(p);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** Base URL for a sanitized provider, e.g. http://192.168.1.20:8080 */
+function localModelBaseUrl(provider) {
+  return `${provider.protocol}://${provider.host}:${provider.port}`;
+}
+
 const DEFAULTS = Object.freeze({
   // Launch at Windows login. Default off.
   autoStart: false,
@@ -169,6 +234,18 @@ const DEFAULTS = Object.freeze({
   searchShortcut: 'CommandOrControl+Alt+F',
   // Starred file paths shown in the search window (max 20).
   favoriteFiles: [],
+  // Phase 7 (v0.8.0): local model providers, CC Switch style.
+  // Each provider: { id, name, preset, protocol, host, port, apiKey, model }.
+  // preset: 'llama.cpp' | 'Ollama' | 'LM Studio' | '自定义'.
+  // Only the provider named by activeLocalModelId is enabled.
+  // The Muse web app itself still talks to Meta's cloud; the local
+  // model powers a separate chat window in this client.
+  localModels: [],
+  activeLocalModelId: null,
+  // Accelerator that toggles the local model chat window.
+  localModelShortcut: 'CommandOrControl+Alt+L',
+  // Last local model chat window bounds { x, y, width, height } or null.
+  localModelBounds: null,
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -231,6 +308,16 @@ function sanitize(raw) {
     .filter((p) => p === 'screenshot' || p === 'camera' || p === 'automation');
   if (isValidAccelerator(raw.searchShortcut)) out.searchShortcut = raw.searchShortcut;
   out.favoriteFiles = sanitizeStringList(raw.favoriteFiles, 20);
+  out.localModels = sanitizeLocalModels(raw.localModels, 10);
+  if (typeof raw.activeLocalModelId === 'string' && raw.activeLocalModelId &&
+      out.localModels.some((p) => p.id === raw.activeLocalModelId)) {
+    out.activeLocalModelId = raw.activeLocalModelId;
+  } else {
+    out.activeLocalModelId = null;
+  }
+  if (isValidAccelerator(raw.localModelShortcut)) out.localModelShortcut = raw.localModelShortcut;
+  const lb = sanitizeBounds(raw.localModelBounds, 420, 480);
+  if (lb) out.localModelBounds = lb;
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }
@@ -281,6 +368,11 @@ module.exports = {
   save,
   authorizeFile,
   isUnderDir,
+  sanitizeLocalModel,
+  sanitizeLocalModels,
+  localModelBaseUrl,
+  LOCAL_MODEL_PRESETS,
+  LOCAL_MODEL_PRESET_PORTS,
   get(key) {
     return load()[key];
   },
