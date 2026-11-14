@@ -1813,6 +1813,140 @@ async function runTaskPackageWithConfirm(pkg, cwd) {
   return { ok: true, report, outcome };
 }
 
+// --- Phase 8 (v0.10.0): scheduled runner tasks --------------------------
+// "Local scheduled tasks" (P2 from the Claude Desktop comparison):
+// a task package that runs by itself at a set time — daily, or weekly
+// on a given weekday — while the app is open. The cloud briefings
+// handle "information"; these handle local "actions" (back up a
+// folder, open the shop admin, clean temp files).
+//
+// Consent model: creating a task and leaving it enabled IS the
+// consent. There is no per-run dialog — that is the point of a
+// scheduled task. Everything else still applies: only whitelisted
+// commands, only inside an authorized folder, only while
+// runnerEnabled is on. Missed slots are NOT caught up (if the app
+// was closed at the due time, that run is simply skipped).
+
+const RUNNER_SCHEDULE_TICK_MS = 30000;
+const RUNNER_SCHEDULE_DUE_WINDOW_MS = 90000; // run if due within the last 90 s
+const RUNNER_WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
+let runnerScheduleTimer = null;
+
+function runnerScheduleText(task) {
+  if (task.kind === 'weekly') return `每周${RUNNER_WEEKDAY_NAMES[task.weekday] || ''} ${task.time}`;
+  return `每天 ${task.time}`;
+}
+
+function runnerSlotKey(date) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+/** Next occurrence of the task strictly after `now`. Pure. */
+function nextRunnerRun(task, now) {
+  const [hh, mm] = task.time.split(':').map(Number);
+  const next = new Date(now);
+  next.setHours(hh, mm, 0, 0);
+  if (task.kind === 'daily') {
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next;
+  }
+  const diff = (task.weekday - now.getDay() + 7) % 7;
+  next.setDate(next.getDate() + diff);
+  if (next <= now) next.setDate(next.getDate() + 7);
+  return next;
+}
+
+/** Most recent scheduled occurrence at or before `now`. Pure. */
+function runnerOccurrenceFor(task, now) {
+  const [hh, mm] = task.time.split(':').map(Number);
+  const occ = new Date(now);
+  occ.setHours(hh, mm, 0, 0);
+  if (task.kind === 'daily') {
+    if (occ > now) occ.setDate(occ.getDate() - 1);
+    return occ;
+  }
+  const diff = (now.getDay() - task.weekday + 7) % 7;
+  occ.setDate(occ.getDate() - diff);
+  if (occ > now) occ.setDate(occ.getDate() - 7);
+  return occ;
+}
+
+/** True when the task is enabled, its slot just came due, and that slot has not run yet. Pure. */
+function isRunnerTaskDue(task, now) {
+  if (!task || task.enabled === false) return false;
+  const occ = runnerOccurrenceFor(task, now);
+  if (task.lastRunKey === runnerSlotKey(occ)) return false;
+  const ageMs = now - occ;
+  return ageMs >= 0 && ageMs <= RUNNER_SCHEDULE_DUE_WINDOW_MS;
+}
+
+function recordRunnerScheduleLog(entry) {
+  const log = config.get('runnerScheduleLog') || [];
+  config.update({ runnerScheduleLog: [entry, ...log].slice(0, 20) });
+  if (runnerWindow && !runnerWindow.isDestroyed()) {
+    runnerWindow.webContents.send('runner:schedule-log', entry);
+  }
+}
+
+function markRunnerTaskRun(task, slotKey) {
+  const tasks = config.get('runnerScheduledTasks') || [];
+  config.update({
+    runnerScheduledTasks: tasks.map((t) => (t.id === task.id ? { ...t, lastRunKey: slotKey } : t)),
+  });
+}
+
+/** Run one due task (no confirmation dialog — creation is the consent). */
+async function runScheduledRunnerTask(task, now) {
+  const occ = runnerOccurrenceFor(task, now);
+  const slotKey = runnerSlotKey(occ);
+  markRunnerTaskRun(task, slotKey);
+  const gate = checkRunnerRun(task.package, task.cwd);
+  if (!gate.ok) {
+    const entry = { taskId: task.id, name: task.name, at: new Date().toISOString(), ok: 0, total: task.package.steps.length, aborted: false, error: runnerGateMessage(gate) };
+    recordRunnerScheduleLog(entry);
+    notify('定时任务失败', `“${task.name}”没能执行：${runnerGateMessage(gate)}`);
+    return { ok: false, reason: gate.reason };
+  }
+  runnerAbortRequested = false;
+  const outcome = await runTaskSteps(task.package, task.cwd, () => {});
+  const okCount = outcome.results.filter((r) => r.status === 'ok').length;
+  const entry = { taskId: task.id, name: task.name, at: new Date().toISOString(), ok: okCount, total: outcome.results.length, aborted: outcome.aborted, error: okCount === outcome.results.length ? '' : '有步骤失败了，打开任务执行器查看报告。' };
+  recordRunnerScheduleLog(entry);
+  if (okCount !== outcome.results.length) {
+    notify('定时任务有步骤失败', `“${task.name}”：${okCount}/${outcome.results.length} 步成功。打开任务执行器查看报告。`);
+  }
+  return { ok: true, outcome };
+}
+
+/** Run every task that is due right now, one after another. */
+async function checkDueRunnerTasks(now) {
+  if (!config.get('runnerEnabled')) return [];
+  const tasks = config.get('runnerScheduledTasks') || [];
+  const ran = [];
+  for (const task of tasks) {
+    if (isRunnerTaskDue(task, now)) {
+      ran.push(task.id);
+      try {
+        await runScheduledRunnerTask(task, now);
+      } catch (err) {
+        console.warn(`Scheduled runner task "${task.name}" failed:`, err && err.message ? err.message : err);
+      }
+    }
+  }
+  return ran;
+}
+
+function startRunnerScheduler() {
+  if (runnerScheduleTimer) return;
+  runnerScheduleTimer = setInterval(() => {
+    checkDueRunnerTasks(new Date()).catch((err) => {
+      console.warn('Scheduled runner check failed:', err && err.message ? err.message : err);
+    });
+  }, RUNNER_SCHEDULE_TICK_MS);
+  if (typeof runnerScheduleTimer.unref === 'function') runnerScheduleTimer.unref();
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -2633,6 +2767,7 @@ if (!gotLock) {
     buildTray();
     registerShortcuts();
     applyFloatingButton();
+    startRunnerScheduler();
 
     // Silent update check shortly after startup (no dialog unless an
     // update is actually available). Failures are logged only.
@@ -3009,6 +3144,76 @@ ipcMain.on('runner:close', () => {
   if (runnerWindow && !runnerWindow.isDestroyed()) runnerWindow.hide();
 });
 
+// Scheduled runner tasks IPC (used by runner-preload.js).
+ipcMain.handle('runner:schedule-list', () => {
+  const now = new Date();
+  const tasks = config.get('runnerScheduledTasks') || [];
+  const log = config.get('runnerScheduleLog') || [];
+  return {
+    enabled: !!config.get('runnerEnabled'),
+    tasks: tasks.map((t) => ({
+      ...t,
+      scheduleText: runnerScheduleText(t),
+      nextRun: nextRunnerRun(t, now).toISOString(),
+      lastLog: log.find((e) => e.taskId === t.id) || null,
+    })),
+    log,
+  };
+});
+ipcMain.handle('runner:schedule-add', (event, input) => {
+  if (!input || typeof input !== 'object') return { ok: false, error: '任务内容不对。' };
+  const parsed = parseTaskPackage(JSON.stringify(input.package || {}));
+  if (!parsed.ok) return { ok: false, error: '任务包不对：' + parsed.error };
+  const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim().slice(0, 120) : parsed.title;
+  const kind = input.kind === 'weekly' ? 'weekly' : 'daily';
+  const time = typeof input.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(input.time) ? input.time : null;
+  if (!time) return { ok: false, error: '时间不对：请用 HH:MM 的格式，例如 09:00。' };
+  let weekday = Number(input.weekday);
+  if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) weekday = 1;
+  const cwd = typeof input.cwd === 'string' ? input.cwd : '';
+  const gate = config.authorizeFile(cwd, config.get('authorizedFolders'), config.get('blockedFolders'));
+  if (!gate.ok) return { ok: false, error: runnerGateMessage({ reason: gate.reason }) };
+  try {
+    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+      return { ok: false, error: '这个文件夹不存在了，请重新选一个。' };
+    }
+  } catch (_) {
+    return { ok: false, error: '这个文件夹不存在了，请重新选一个。' };
+  }
+  const task = {
+    id: 'task-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    name,
+    enabled: true,
+    kind,
+    time,
+    weekday,
+    cwd,
+    package: parsed,
+    lastRunKey: '',
+  };
+  const tasks = config.get('runnerScheduledTasks') || [];
+  config.update({ runnerScheduledTasks: [...tasks, task].slice(0, 20) });
+  return { ok: true, task };
+});
+ipcMain.handle('runner:schedule-set-enabled', (event, id, enabled) => {
+  const tasks = config.get('runnerScheduledTasks') || [];
+  config.update({
+    runnerScheduledTasks: tasks.map((t) => (t.id === id ? { ...t, enabled: !!enabled } : t)),
+  });
+  return true;
+});
+ipcMain.handle('runner:schedule-delete', (event, id) => {
+  const tasks = config.get('runnerScheduledTasks') || [];
+  config.update({ runnerScheduledTasks: tasks.filter((t) => t.id !== id) });
+  return true;
+});
+ipcMain.handle('runner:schedule-run-now', async (event, id) => {
+  const tasks = config.get('runnerScheduledTasks') || [];
+  const task = tasks.find((t) => t.id === id);
+  if (!task) return { ok: false, reason: 'not-found' };
+  return runTaskPackageWithConfirm(task.package, task.cwd);
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -3039,6 +3244,11 @@ module.exports = {
   runTaskSteps,
   buildRunnerReport,
   abortRunnerRun,
+  runnerScheduleText,
+  nextRunnerRun,
+  runnerOccurrenceFor,
+  isRunnerTaskDue,
+  checkDueRunnerTasks,
   searchFileNames,
   toggleFavoriteFile,
   CLOUD_SERVICES,

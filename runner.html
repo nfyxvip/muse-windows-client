@@ -76,6 +76,27 @@
       <button type="button" id="abortBtn" style="display:none">中止</button>
     </div>
     <div class="status" id="runStatus"></div>
+    <div style="border-top:1px solid #eee; margin-top:10px; padding-top:10px">
+      <h3 style="font-size:13px;margin:0 0 8px">定时执行这个任务包</h3>
+      <div class="row" style="flex-wrap:wrap">
+        <input type="text" id="schedName" placeholder="任务名" spellcheck="false" style="flex:1; min-width:120px; font-size:13px; padding:7px 9px; border:1px solid #ccc; border-radius:8px">
+        <select id="schedKind" style="font-size:13px; padding:7px 9px; border:1px solid #ccc; border-radius:8px">
+          <option value="daily">每天</option>
+          <option value="weekly">每周</option>
+        </select>
+        <select id="schedWeekday" style="font-size:13px; padding:7px 9px; border:1px solid #ccc; border-radius:8px; display:none">
+          <option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="0">周日</option>
+        </select>
+        <input type="time" id="schedTime" value="09:00" style="font-size:13px; padding:6px 9px; border:1px solid #ccc; border-radius:8px">
+        <button type="button" id="saveSchedBtn">保存为定时任务</button>
+      </div>
+      <p class="hint">保存后，到点会自动执行（应用开着的时候）。创建并启用就是同意：到点执行时不再弹窗问你，但只跑白名单里的命令、只在上面选的文件夹里跑。</p>
+    </div>
+  </div>
+  <div class="card" id="scheduleCard">
+    <h3>定时任务</h3>
+    <div id="scheduleList"></div>
+    <p class="hint">应用关着的时候不会执行，错过的那次不会补跑；失败了会弹通知，记录留在这里。</p>
   </div>
   <div class="card" id="reportCard" style="display:none">
     <h3>任务报告</h3>
@@ -152,6 +173,7 @@
       return;
     }
     pkg = res;
+    $('schedName').value = pkg.title;
     const allowed = new Set((state.allowedCommands || []).map((c) => String(c).toLowerCase()));
     const list = $('stepsList');
     list.innerHTML = '';
@@ -267,10 +289,113 @@
     }
   });
 
+  async function refreshSchedules() {
+    let data = null;
+    try {
+      data = await window.museRunner.getSchedules();
+    } catch (e) {
+      data = null;
+    }
+    const list = $('scheduleList');
+    list.innerHTML = '';
+    if (!data || !data.tasks || !data.tasks.length) {
+      const d = document.createElement('div');
+      d.className = 'hint';
+      d.textContent = '还没有定时任务：上面解析一个任务包，填好时间点“保存为定时任务”。';
+      list.appendChild(d);
+      return;
+    }
+    data.tasks.forEach((t) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; gap:8px; align-items:center; padding:7px 0; border-top:1px solid #f0f0f0; font-size:13px;';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!t.enabled;
+      cb.title = t.enabled ? '已启用，到点自动执行' : '已停用';
+      cb.addEventListener('change', async () => {
+        await window.museRunner.setScheduleEnabled(t.id, cb.checked);
+        refreshSchedules();
+      });
+      const meta = document.createElement('div');
+      meta.style.cssText = 'flex:1; min-width:0;';
+      const name = document.createElement('div');
+      name.textContent = t.name;
+      name.style.fontWeight = '600';
+      const sub = document.createElement('div');
+      sub.style.cssText = 'font-size:12px; color:#888;';
+      const next = new Date(t.nextRun);
+      let subText = t.scheduleText + ' · 下次 ' + next.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', weekday: 'short' });
+      if (t.lastLog) {
+        const at = new Date(t.lastLog.at);
+        subText += ' · 上次 ' + at.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) + '：' + t.lastLog.ok + '/' + t.lastLog.total + ' 步成功' + (t.lastLog.error ? '（有失败）' : '');
+      }
+      sub.textContent = subText;
+      meta.appendChild(name);
+      meta.appendChild(sub);
+      const runBtn = document.createElement('button');
+      runBtn.type = 'button';
+      runBtn.textContent = '立即执行';
+      runBtn.style.cssText = 'font-size:12px; padding:4px 10px;';
+      runBtn.addEventListener('click', async () => {
+        const res = await window.museRunner.runScheduleNow(t.id);
+        if (res && !res.ok && res.reason && res.reason !== 'cancelled') {
+          setStatus('没有执行：' + res.reason, 'err');
+        }
+        refreshSchedules();
+      });
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.textContent = '删除';
+      delBtn.style.cssText = 'font-size:12px; padding:4px 10px;';
+      delBtn.addEventListener('click', async () => {
+        await window.museRunner.deleteSchedule(t.id);
+        refreshSchedules();
+      });
+      row.appendChild(cb);
+      row.appendChild(meta);
+      row.appendChild(runBtn);
+      row.appendChild(delBtn);
+      list.appendChild(row);
+    });
+  }
+
+  $('schedKind').addEventListener('change', (e) => {
+    $('schedWeekday').style.display = e.target.value === 'weekly' ? '' : 'none';
+  });
+
+  $('saveSchedBtn').addEventListener('click', async () => {
+    if (!pkg) {
+      setStatus('请先解析一个任务包。', 'err');
+      return;
+    }
+    if (!cwd) {
+      setStatus('请先选一个文件夹（必须是已授权的）。', 'err');
+      return;
+    }
+    const input = {
+      name: $('schedName').value.trim() || pkg.title,
+      kind: $('schedKind').value,
+      time: $('schedTime').value,
+      weekday: Number($('schedWeekday').value),
+      cwd,
+      package: pkg,
+    };
+    const res = await window.museRunner.addSchedule(input);
+    if (res && res.ok) {
+      setStatus('已保存定时任务“' + res.task.name + '”。到点会自动执行（应用开着的时候）。', 'ok');
+      refreshSchedules();
+    } else {
+      setStatus(res && res.error ? res.error : '保存失败。', 'err');
+    }
+  });
+
+  window.museRunner.onScheduleLog(() => refreshSchedules());
+
   $('settingsBtn').addEventListener('click', () => window.museRunner.openSettings());
-  window.addEventListener('focus', refreshState);
+  window.addEventListener('focus', () => { refreshState(); refreshSchedules(); });
 
   refreshState();
+  refreshSchedules();
 })();
 </script>
 </body>

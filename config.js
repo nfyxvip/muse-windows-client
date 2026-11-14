@@ -171,6 +171,77 @@ function localModelBaseUrl(provider) {
   return `${provider.protocol}://${provider.host}:${provider.port}`;
 }
 
+// --- Scheduled runner tasks (Phase 8, v0.10.0) -------------------------
+// Shape validation only; the task package itself is re-validated
+// with parseTaskPackage in the main process before a task is saved.
+
+function sanitizeRunnerTask(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const id = typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 64) : null;
+  if (!id) return null;
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 120) : '定时任务';
+  const kind = raw.kind === 'weekly' ? 'weekly' : 'daily';
+  const time = typeof raw.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(raw.time) ? raw.time : '09:00';
+  let weekday = Number(raw.weekday);
+  if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) weekday = 1;
+  const cwd = typeof raw.cwd === 'string' ? raw.cwd : '';
+  if (!cwd) return null;
+  const pkg = raw.package;
+  if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return null;
+  const title = typeof pkg.title === 'string' && pkg.title.trim() ? pkg.title.trim().slice(0, 120) : '未命名任务';
+  if (!Array.isArray(pkg.steps) || pkg.steps.length === 0 || pkg.steps.length > 20) return null;
+  for (const s of pkg.steps) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return null;
+    if (typeof s.cmd !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s.cmd)) return null;
+    if (s.args !== undefined && (!Array.isArray(s.args) || s.args.some((a) => typeof a !== 'string'))) return null;
+  }
+  return {
+    id,
+    name,
+    enabled: raw.enabled !== false,
+    kind,
+    time,
+    weekday,
+    cwd,
+    package: { title, steps: pkg.steps.map((s) => ({ cmd: s.cmd, args: s.args || [] })) },
+    lastRunKey: typeof raw.lastRunKey === 'string' ? raw.lastRunKey : '',
+  };
+}
+
+function sanitizeRunnerTasks(raw, max) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const t = sanitizeRunnerTask(item);
+    if (!t) continue;
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    out.push(t);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function sanitizeScheduleLog(raw, max) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    out.push({
+      taskId: typeof item.taskId === 'string' ? item.taskId : '',
+      name: typeof item.name === 'string' ? item.name.slice(0, 120) : '',
+      at: typeof item.at === 'string' ? item.at : '',
+      ok: Number(item.ok) || 0,
+      total: Number(item.total) || 0,
+      aborted: !!item.aborted,
+      error: typeof item.error === 'string' ? item.error.slice(0, 300) : '',
+    });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 const DEFAULTS = Object.freeze({
   // Launch at Windows login. Default off.
   autoStart: false,
@@ -261,6 +332,18 @@ const DEFAULTS = Object.freeze({
   runnerAllowedCommands: ['php', 'composer', 'git', 'npm', 'node', 'npx'],
   // Last task runner window bounds { x, y, width, height } or null.
   runnerBounds: null,
+  // Phase 8 (v0.10.0): scheduled runner tasks. Each task:
+  // { id, name, enabled, kind: 'daily'|'weekly', time: 'HH:MM',
+  // weekday: 0-6 (weekly only, 0 = Sunday), cwd, package: { title, steps },
+  // lastRunKey: 'YYYY-MM-DD HH:MM' of the last slot that ran }.
+  // A task runs automatically when the app is open and its time
+  // comes; creating + enabling a task is the consent (no per-run
+  // dialog — that is the point of a scheduled task). Missed slots
+  // are NOT caught up when the app was closed.
+  runnerScheduledTasks: [],
+  // Log of scheduled runs (newest first, max 20):
+  // { taskId, name, at (ISO), ok, total, aborted, error }.
+  runnerScheduleLog: [],
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -342,6 +425,8 @@ function sanitize(raw) {
     .filter((c) => /^[a-z0-9][a-z0-9._-]*$/.test(c));
   const rb = sanitizeBounds(raw.runnerBounds, 480, 520);
   if (rb) out.runnerBounds = rb;
+  out.runnerScheduledTasks = sanitizeRunnerTasks(raw.runnerScheduledTasks, 20);
+  out.runnerScheduleLog = sanitizeScheduleLog(raw.runnerScheduleLog, 20);
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }

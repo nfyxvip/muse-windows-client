@@ -23,4 +23,10 @@ contextBridge.exposeInMainWorld('museRunner', {
   onFinished: (cb) => ipcRenderer.on('runner:finished', (event, info) => cb(info)),
   openSettings: () => ipcRenderer.send('runner:open-settings'),
   close: () => ipcRenderer.send('runner:close'),
+  getSchedules: () => ipcRenderer.invoke('runner:schedule-list'),
+  addSchedule: (input) => ipcRenderer.invoke('runner:schedule-add', input),
+  setScheduleEnabled: (id, enabled) => ipcRenderer.invoke('runner:schedule-set-enabled', id, enabled),
+  deleteSchedule: (id) => ipcRenderer.invoke('runner:schedule-delete', id),
+  runScheduleNow: (id) => ipcRenderer.invoke('runner:schedule-run-now', id),
+  onScheduleLog: (cb) => ipcRenderer.on('runner:schedule-log', (event, entry) => cb(entry)),
 });
