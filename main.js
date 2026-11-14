@@ -100,6 +100,17 @@
  * client. API keys, if the user types one, are stored only in the
  * local config file and only ever sent to the configured endpoint.
  *
+ * v0.9.0 adds the local task runner (Phase 8, P1 from the Claude
+ * Desktop comparison): Edison gives a "task package" in chat — a
+ * JSON list of commands — the user pastes it into the runner
+ * window, picks an authorized folder, confirms, and the client
+ * runs the steps one by one (spawn, no shell) and builds a
+ * Markdown report to copy back into the chat. Only whitelisted
+ * commands can run (default: php, composer, git, npm, node, npx),
+ * only inside authorized folders, only after a per-run
+ * confirmation. There is no direct channel between Edison and the
+ * client: the user is the only bridge, and the only approver.
+ *
  * Phase 6 (v0.7.0):
  * - Cloud service entries: a "Connect" window that jumps to the
  *   services' web apps (Muse, Gmail, Outlook, Google Calendar,
@@ -132,6 +143,7 @@ const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, shell, dial
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
 const fs = require('node:fs');
+const { spawn } = require('node:child_process');
 const config = require('./config');
 
 const MUSE_URL = 'https://muse.ai';
@@ -147,6 +159,8 @@ const DICTATION_WIDTH = 440;
 const DICTATION_HEIGHT = 560;
 const LOCAL_MODEL_WIDTH = 560;
 const LOCAL_MODEL_HEIGHT = 680;
+const RUNNER_WIDTH = 640;
+const RUNNER_HEIGHT = 720;
 const FLOATING_SIZE = 64;
 
 let mainWindow = null;
@@ -162,6 +176,9 @@ let searchWindow = null;
 let connectWindow = null;
 let localModelWindow = null;
 let localModelStreamAbort = null;
+let runnerWindow = null;
+let runnerCurrentChild = null;
+let runnerAbortRequested = false;
 let lastFullCapture = null; // { image: nativeImage, rect: {x,y,width,height} in image pixels }
 let floatingWindow = null;
 let tray = null;
@@ -173,6 +190,7 @@ let dictationShortcutStatus = 'disabled';
 let screenshotShortcutStatus = 'disabled';
 let searchShortcutStatus = 'disabled';
 let localModelShortcutStatus = 'disabled';
+let runnerShortcutStatus = 'disabled';
 let updateCheckInFlight = false;
 
 // electron-updater is optional at runtime: if it cannot be loaded,
@@ -656,6 +674,13 @@ const PERMISSION_INFO = {
       '本地操作只能打开白名单里的几个程序（记事本、计算器、文件资源管理器、默认浏览器），每次执行前都会再问你一次。\n\n' +
       '会做的：只在你点了“执行”后，打开你选的那一个程序。\n' +
       '不会做的：不会远程触发、不会后台静默控制、不会记录键盘鼠标。',
+  },
+  runner: {
+    title: '使用任务执行器？',
+    detail:
+      '任务执行器按你粘贴的“任务包”（一份命令清单）跑命令，例如 php、composer、git。每次执行前都会把全部步骤和文件夹列出来问你一次。\n\n' +
+      '会做的：只在授权文件夹里、只跑白名单里的命令，把每一步的输出写进一份报告，报告由你自己复制回聊天。\n' +
+      '不会做的：不会自动执行、不跑白名单外的命令、不离开授权文件夹、不绕过你把结果发给任何人。',
   },
 };
 
@@ -1466,6 +1491,328 @@ function toggleLocalModel() {
   }
 }
 
+// --- Phase 8 (v0.9.0): local task runner --------------------------------
+// Task-package round-trip (Claude Desktop comparison §3, mode 1):
+// Edison writes the code in the cloud and gives a "task package" in
+// chat — a JSON list of commands. The user pastes it here, picks an
+// authorized folder, confirms, and the client runs the steps one by
+// one and builds a Markdown report to copy back into the chat.
+// There is NO direct channel between Edison and this client: the
+// user is the only bridge, and the only approver.
+//
+// Safety, all enforced in the main process (the page cannot bypass
+// any of it):
+// - Default OFF (runnerEnabled); first use asks once (PERMISSION_INFO).
+// - Only whitelisted executables (runnerAllowedCommands, bare names
+//   only) — anything else refuses the whole package.
+// - Only inside an authorized folder (and never a blocked one).
+// - spawn() with shell: false — no shell, no pipes, no redirection,
+//   no command chaining. Arguments are passed as an array.
+// - Every run needs a confirmation dialog listing all steps + folder.
+// - Per-step timeout (120 s) and output cap (64 KB).
+
+const RUNNER_MAX_STEPS = 20;
+const RUNNER_STEP_TIMEOUT_MS = 120000;
+const RUNNER_OUTPUT_CAP = 65536;
+
+/** Parse and validate pasted task-package JSON. Pure function. */
+function parseTaskPackage(text) {
+  if (typeof text !== 'string' || !text.trim()) {
+    return { ok: false, error: '任务包是空的：把 Edison 在聊天里给你的 JSON 任务包粘贴进来。' };
+  }
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, error: '不是有效的 JSON：' + (err && err.message ? err.message : String(err)) };
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, error: '任务包应该是一个 JSON 对象，形如 {"title": "…", "steps": [{"cmd": "php", "args": ["-v"]}]}。' };
+  }
+  const title = typeof data.title === 'string' && data.title.trim()
+    ? data.title.trim().slice(0, 120)
+    : '未命名任务';
+  const steps = data.steps;
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return { ok: false, error: '任务包里没有步骤：steps 应该是一个非空数组。' };
+  }
+  if (steps.length > RUNNER_MAX_STEPS) {
+    return { ok: false, error: `步骤太多了（最多 ${RUNNER_MAX_STEPS} 步），请拆成几个任务包。` };
+  }
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (!s || typeof s !== 'object' || Array.isArray(s)) {
+      return { ok: false, error: `第 ${i + 1} 步不是一个对象，应该是 {"cmd": "php", "args": ["-v"]} 这样的形式。` };
+    }
+    if (typeof s.cmd !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s.cmd)) {
+      return { ok: false, error: `第 ${i + 1} 步的命令名不对：命令只能是单个程序名（如 php、git），不能带路径、空格或符号。` };
+    }
+    if (s.args !== undefined && (!Array.isArray(s.args) || s.args.some((a) => typeof a !== 'string'))) {
+      return { ok: false, error: `第 ${i + 1} 步的参数不对：args 应该是一个字符串数组。` };
+    }
+  }
+  return { ok: true, title, steps: steps.map((s) => ({ cmd: s.cmd, args: s.args || [] })) };
+}
+
+function runnerAllowedCommands() {
+  return (config.get('runnerAllowedCommands') || []).map((c) => String(c).toLowerCase());
+}
+
+/** Returns { ok: true } or { ok: false, blocked: [names] }. */
+function checkRunnerSteps(steps) {
+  const allowed = new Set(runnerAllowedCommands());
+  const blocked = [...new Set(steps.filter((s) => !allowed.has(s.cmd.toLowerCase())).map((s) => s.cmd))];
+  return blocked.length ? { ok: false, blocked } : { ok: true };
+}
+
+/** Gate for running anything: feature on + folder authorized + exists. */
+function checkRunnerRun(pkg, cwd) {
+  if (!config.get('runnerEnabled')) return { ok: false, reason: 'disabled' };
+  if (typeof cwd !== 'string' || !cwd) return { ok: false, reason: 'no-folder' };
+  const gate = config.authorizeFile(cwd, config.get('authorizedFolders'), config.get('blockedFolders'));
+  if (!gate.ok) return { ok: false, reason: gate.reason };
+  try {
+    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+      return { ok: false, reason: 'missing-folder' };
+    }
+  } catch (_) {
+    return { ok: false, reason: 'missing-folder' };
+  }
+  const wl = checkRunnerSteps(pkg.steps);
+  if (!wl.ok) return { ok: false, reason: 'not-whitelisted', blocked: wl.blocked };
+  return { ok: true };
+}
+
+function runnerGateMessage(gate) {
+  if (gate.reason === 'disabled') return '任务执行器还没有开启：请先在设置 → 任务执行器里打开它。';
+  if (gate.reason === 'no-folders') return '还没有授权文件夹：请先在设置 → 文件与授权文件夹里添加一个文件夹（例如你的 CI4 项目文件夹）。';
+  if (gate.reason === 'not-authorized') return '这个文件夹不在授权列表里：请先在设置 → 文件与授权文件夹里授权它。';
+  if (gate.reason === 'blocked') return '这个文件夹在黑名单里，拒绝执行。';
+  if (gate.reason === 'missing-folder') return '这个文件夹不存在了，请重新选一个。';
+  if (gate.reason === 'not-whitelisted') {
+    return '任务包里有白名单外的命令：' + (gate.blocked || []).join('、') +
+      '。请先在设置 → 任务执行器 → 白名单里加上它，或让 Edison 换一条白名单里的命令。';
+  }
+  return '现在不能执行这个任务。';
+}
+
+/**
+ * Run the steps one by one. onEvent receives { type: 'step-start' |
+ * 'step-done', index, ... }. Resolves { results, aborted }. Each
+ * result: { cmd, args, index, status: 'ok'|'failed'|'timeout',
+ * exitCode, durationMs, output, truncated, error }.
+ */
+function runTaskSteps(pkg, cwd, onEvent) {
+  return new Promise((resolve) => {
+    const results = [];
+    let index = 0;
+    const emit = onEvent || (() => {});
+    const next = () => {
+      if (runnerAbortRequested) {
+        resolve({ results, aborted: true });
+        return;
+      }
+      if (index >= pkg.steps.length) {
+        resolve({ results, aborted: false });
+        return;
+      }
+      const step = pkg.steps[index];
+      const startedAt = Date.now();
+      emit({ type: 'step-start', index, cmd: step.cmd, args: step.args });
+      let child;
+      try {
+        child = spawn(step.cmd, step.args, { cwd, shell: false, windowsHide: true });
+      } catch (err) {
+        results.push({ cmd: step.cmd, args: step.args, index, status: 'failed', exitCode: null, durationMs: Date.now() - startedAt, output: '', truncated: false, error: '启动失败：' + (err && err.message ? err.message : String(err)) });
+        emit({ type: 'step-done', index, result: results[results.length - 1] });
+        index++;
+        next();
+        return;
+      }
+      runnerCurrentChild = child;
+      let output = '';
+      let truncated = false;
+      let timedOut = false;
+      let settled = false;
+      const push = (chunk) => {
+        if (truncated) return;
+        output += chunk;
+        if (output.length > RUNNER_OUTPUT_CAP) {
+          output = output.slice(0, RUNNER_OUTPUT_CAP);
+          truncated = true;
+        }
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill(); } catch (_) { /* already gone */ }
+      }, RUNNER_STEP_TIMEOUT_MS);
+      child.stdout.on('data', (d) => push(d.toString('utf8')));
+      child.stderr.on('data', (d) => push(d.toString('utf8')));
+      child.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        runnerCurrentChild = null;
+        results.push({ cmd: step.cmd, args: step.args, index, status: 'failed', exitCode: null, durationMs: Date.now() - startedAt, output, truncated, error: '启动失败：' + (err && err.message ? err.message : String(err)) });
+        emit({ type: 'step-done', index, result: results[results.length - 1] });
+        index++;
+        next();
+      });
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        runnerCurrentChild = null;
+        const status = timedOut ? 'timeout' : (code === 0 ? 'ok' : 'failed');
+        results.push({
+          cmd: step.cmd, args: step.args, index, status,
+          exitCode: code, durationMs: Date.now() - startedAt, output, truncated,
+          error: timedOut ? `超时（超过 ${RUNNER_STEP_TIMEOUT_MS / 1000} 秒，已终止）` : '',
+        });
+        emit({ type: 'step-done', index, result: results[results.length - 1] });
+        index++;
+        next();
+      });
+    };
+    next();
+  });
+}
+
+/** Build the Markdown report the user copies back into the chat. */
+function buildRunnerReport(pkg, cwd, outcome) {
+  const lines = [];
+  lines.push(`# 任务报告：${pkg.title}`);
+  lines.push('');
+  lines.push(`- 时间：${new Date().toLocaleString('zh-CN')}`);
+  lines.push(`- 文件夹：${cwd}`);
+  const okCount = outcome.results.filter((r) => r.status === 'ok').length;
+  lines.push(`- 结果：${okCount}/${outcome.results.length} 步成功${outcome.aborted ? '（中途中止）' : ''}`);
+  lines.push('');
+  outcome.results.forEach((r, i) => {
+    lines.push(`## 步骤 ${i + 1}：${r.cmd}${r.args.length ? ' ' + r.args.join(' ') : ''}`);
+    const state = r.status === 'ok' ? '成功' : r.status === 'timeout' ? '超时' : '失败';
+    lines.push(`- 状态：${state}，退出码：${r.exitCode === null ? '（未启动）' : r.exitCode}，用时：${(r.durationMs / 1000).toFixed(1)} 秒`);
+    if (r.error) lines.push(`- 错误：${r.error}`);
+    lines.push('```');
+    lines.push(r.output ? r.output.replace(/\s+$/, '') : '（无输出）');
+    if (r.truncated) lines.push(`…（输出太长，只保留前 ${Math.round(RUNNER_OUTPUT_CAP / 1024)} KB）`);
+    lines.push('```');
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
+function createRunnerWindow() {
+  if (runnerWindow && !runnerWindow.isDestroyed()) {
+    runnerWindow.show();
+    runnerWindow.focus();
+    return runnerWindow;
+  }
+  const saved = config.get('runnerBounds');
+  const opts = {
+    width: saved ? saved.width : RUNNER_WIDTH,
+    height: saved ? saved.height : RUNNER_HEIGHT,
+    minWidth: 480,
+    minHeight: 520,
+    title: '任务执行器 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'runner-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  };
+  if (saved) {
+    opts.x = saved.x;
+    opts.y = saved.y;
+  }
+  runnerWindow = new BrowserWindow(opts);
+  runnerWindow.setMenu(null);
+  runnerWindow.loadFile(path.join(__dirname, 'runner.html'));
+  runnerWindow.once('ready-to-show', () => {
+    runnerWindow.show();
+    runnerWindow.focus();
+  });
+  runnerWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      runnerWindow.hide();
+      event.preventDefault();
+    }
+  });
+  runnerWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      try {
+        config.update({ runnerBounds: runnerWindow.getBounds() });
+      } catch (_) { /* bounds are best-effort */ }
+      runnerWindow.hide();
+    }
+  });
+  runnerWindow.on('closed', () => {
+    runnerWindow = null;
+  });
+  return runnerWindow;
+}
+
+function toggleRunner() {
+  if (!runnerWindow || runnerWindow.isDestroyed()) {
+    createRunnerWindow();
+    return;
+  }
+  if (runnerWindow.isVisible()) {
+    runnerWindow.hide();
+  } else {
+    runnerWindow.show();
+    runnerWindow.focus();
+  }
+}
+
+/** Ask the currently running step (if any) to stop. Used by the IPC handler and the smoke tests. */
+function abortRunnerRun() {
+  runnerAbortRequested = true;
+  if (runnerCurrentChild) {
+    try { runnerCurrentChild.kill(); } catch (_) { /* already gone */ }
+  }
+}
+
+async function runTaskPackageWithConfirm(pkg, cwd) {
+  const gate = checkRunnerRun(pkg, cwd);
+  if (!gate.ok) {
+    dialog.showMessageBox(runnerWindow || mainWindow, {
+      type: 'info',
+      title: '无法执行任务',
+      message: '这个任务现在不能执行',
+      detail: runnerGateMessage(gate),
+    }).catch(() => {});
+    return { ok: false, reason: gate.reason };
+  }
+  if (!(await confirmPermissionOnce('runner'))) return { ok: false, reason: 'cancelled' };
+  const stepLines = pkg.steps.map((s, i) => `  ${i + 1}. ${s.cmd}${s.args.length ? ' ' + s.args.join(' ') : ''}`).join('\n');
+  const { response } = await dialog.showMessageBox(runnerWindow || mainWindow, {
+    type: 'question',
+    title: '执行任务？',
+    message: `将要执行“${pkg.title}”（${pkg.steps.length} 步）`,
+    detail: `文件夹：${cwd}\n\n${stepLines}\n\n只跑上面列出的命令，不会做别的事。`,
+    buttons: ['执行', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return { ok: false, reason: 'cancelled' };
+  runnerAbortRequested = false;
+  const outcome = await runTaskSteps(pkg, cwd, (event) => {
+    if (runnerWindow && !runnerWindow.isDestroyed()) {
+      runnerWindow.webContents.send('runner:progress', event);
+    }
+  });
+  const report = buildRunnerReport(pkg, cwd, outcome);
+  if (runnerWindow && !runnerWindow.isDestroyed()) {
+    runnerWindow.webContents.send('runner:finished', { report, okCount: outcome.results.filter((r) => r.status === 'ok').length, total: outcome.results.length, aborted: outcome.aborted });
+  }
+  return { ok: true, report, outcome };
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -1922,6 +2269,18 @@ function registerShortcuts() {
     }
   }
 
+  if (config.get('runnerEnabled')) {
+    const accelerator = config.get('runnerShortcut') || 'CommandOrControl+Alt+R';
+    if (registerOneShortcut(accelerator, toggleRunner)) {
+      runnerShortcutStatus = 'ok';
+    } else {
+      runnerShortcutStatus = 'failed';
+      reportShortcutFailure('任务执行器', accelerator);
+    }
+  } else {
+    runnerShortcutStatus = 'disabled';
+  }
+
   buildTrayMenu();
   buildMenu();
 }
@@ -2052,6 +2411,7 @@ function buildMenu() {
         { label: '拍照', click: () => openCameraWindow() },
         { label: `文件名搜索 (${describeShortcut(config.get('searchShortcut'))})`, click: () => toggleSearch() },
         { label: `本地模型 (${describeShortcut(config.get('localModelShortcut'))})`, click: () => toggleLocalModel() },
+        { label: `任务执行器 (${describeShortcut(config.get('runnerShortcut'))})`, click: () => toggleRunner() },
         { label: '连接云端服务…', click: () => createConnectWindow() },
         {
           label: '本地操作',
@@ -2158,6 +2518,7 @@ function buildTrayMenu() {
     { label: '拍照', click: () => openCameraWindow() },
     { label: '文件名搜索', click: () => toggleSearch() },
     { label: '本地模型', click: () => toggleLocalModel() },
+    { label: '任务执行器', click: () => toggleRunner() },
     { label: '连接云端服务…', click: () => createConnectWindow() },
     { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
@@ -2307,7 +2668,7 @@ app.on('window-all-closed', (event) => {
 ipcMain.handle('settings-get', () => ({
   ...config.load(),
   version: app.getVersion(),
-  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus, localModel: localModelShortcutStatus },
+  shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus, localModel: localModelShortcutStatus, runner: runnerShortcutStatus },
 }));
 ipcMain.handle('settings-set', (event, partial) => {
   const next = config.update(partial || {});
@@ -2323,7 +2684,9 @@ ipcMain.handle('settings-set', (event, partial) => {
     Object.prototype.hasOwnProperty.call(p, 'screenshotEnabled') ||
     Object.prototype.hasOwnProperty.call(p, 'screenshotShortcut') ||
     Object.prototype.hasOwnProperty.call(p, 'searchShortcut') ||
-    Object.prototype.hasOwnProperty.call(p, 'localModelShortcut')
+    Object.prototype.hasOwnProperty.call(p, 'localModelShortcut') ||
+    Object.prototype.hasOwnProperty.call(p, 'runnerEnabled') ||
+    Object.prototype.hasOwnProperty.call(p, 'runnerShortcut')
   ) {
     registerShortcuts();
   }
@@ -2333,7 +2696,7 @@ ipcMain.handle('settings-set', (event, partial) => {
   buildMenu();
   return {
     ...next,
-    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus, localModel: localModelShortcutStatus },
+    shortcutStatus: { toggle: toggleShortcutStatus, quickChat: quickChatShortcutStatus, dictation: dictationShortcutStatus, screenshot: screenshotShortcutStatus, search: searchShortcutStatus, localModel: localModelShortcutStatus, runner: runnerShortcutStatus },
   };
 });
 ipcMain.handle('check-updates', () => {
@@ -2591,6 +2954,61 @@ ipcMain.on('local-model:close', () => {
   if (localModelWindow && !localModelWindow.isDestroyed()) localModelWindow.hide();
 });
 
+// Task runner IPC (used by runner-preload.js). All validation and
+// execution happens in the main process; the page only displays.
+ipcMain.handle('runner:get-state', () => ({
+  enabled: !!config.get('runnerEnabled'),
+  allowedCommands: runnerAllowedCommands(),
+  authorizedFolders: config.get('authorizedFolders') || [],
+  shortcut: config.get('runnerShortcut') || 'CommandOrControl+Alt+R',
+}));
+ipcMain.handle('runner:pick-folder', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(runnerWindow || mainWindow, {
+    title: '选择要执行任务的文件夹（必须已授权）',
+    properties: ['openDirectory'],
+  });
+  if (canceled || !filePaths || filePaths.length === 0) return { ok: false, reason: 'cancelled' };
+  const folder = filePaths[0];
+  const gate = config.authorizeFile(folder, config.get('authorizedFolders'), config.get('blockedFolders'));
+  if (!gate.ok) {
+    return { ok: false, reason: gate.reason, folder };
+  }
+  return { ok: true, folder };
+});
+ipcMain.handle('runner:parse', (event, text) => parseTaskPackage(text));
+ipcMain.handle('runner:check', (event, pkg, cwd) => checkRunnerRun(pkg, cwd));
+ipcMain.handle('runner:run', async (event, pkg, cwd) => runTaskPackageWithConfirm(pkg, cwd));
+ipcMain.handle('runner:abort', () => {
+  abortRunnerRun();
+  return true;
+});
+ipcMain.handle('runner:copy-report', (event, report) => {
+  clipboard.writeText(report || '');
+  return true;
+});
+ipcMain.handle('runner:save-report', async (event, report, cwd, title) => {
+  const safeTitle = String(title || '任务报告').replace(/[\\/:*?"<>|]/g, '').trim() || '任务报告';
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const { canceled, filePath } = await dialog.showSaveDialog(runnerWindow || mainWindow, {
+    title: '保存任务报告',
+    defaultPath: path.join(cwd || '', `${safeTitle}-${stamp}.md`),
+    filters: [{ name: 'Markdown', extensions: ['md'] }, { name: '文本', extensions: ['txt'] }],
+  });
+  if (canceled || !filePath) return { ok: false, reason: 'cancelled' };
+  try {
+    fs.writeFileSync(filePath, report || '', 'utf8');
+    return { ok: true, filePath };
+  } catch (err) {
+    return { ok: false, reason: 'failed', error: err && err.message ? err.message : String(err) };
+  }
+});
+ipcMain.on('runner:open-settings', () => {
+  createSettingsWindow();
+});
+ipcMain.on('runner:close', () => {
+  if (runnerWindow && !runnerWindow.isDestroyed()) runnerWindow.hide();
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -2613,6 +3031,14 @@ module.exports = {
   getActiveLocalModel,
   testLocalModelConnection,
   streamLocalModelChat,
+  createRunnerWindow,
+  toggleRunner,
+  parseTaskPackage,
+  checkRunnerSteps,
+  checkRunnerRun,
+  runTaskSteps,
+  buildRunnerReport,
+  abortRunnerRun,
   searchFileNames,
   toggleFavoriteFile,
   CLOUD_SERVICES,

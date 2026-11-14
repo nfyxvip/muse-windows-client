@@ -246,6 +246,21 @@ const DEFAULTS = Object.freeze({
   localModelShortcut: 'CommandOrControl+Alt+L',
   // Last local model chat window bounds { x, y, width, height } or null.
   localModelBounds: null,
+  // Phase 8 (v0.9.0): local task runner. Runs a "task package" — a
+  // JSON list of commands Edison gives in chat. The user pastes it
+  // into the runner window, picks an authorized folder, confirms,
+  // and the client runs the steps one by one (spawn, no shell),
+  // capturing output into a Markdown report the user copies back
+  // into the chat. Default OFF. Only commands on the whitelist can
+  // run; anything else is refused with a pointer to Settings.
+  runnerEnabled: false,
+  // Accelerator that toggles the task runner window.
+  runnerShortcut: 'CommandOrControl+Alt+R',
+  // Whitelisted executable names the runner may start (bare names
+  // only, no paths). Defaults cover the CI4 shop workflow.
+  runnerAllowedCommands: ['php', 'composer', 'git', 'npm', 'node', 'npx'],
+  // Last task runner window bounds { x, y, width, height } or null.
+  runnerBounds: null,
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -305,7 +320,7 @@ function sanitize(raw) {
   if (typeof raw.automationAllowExplorer === 'boolean') out.automationAllowExplorer = raw.automationAllowExplorer;
   if (typeof raw.automationAllowBrowser === 'boolean') out.automationAllowBrowser = raw.automationAllowBrowser;
   out.confirmedPermissions = sanitizeStringList(raw.confirmedPermissions, 10)
-    .filter((p) => p === 'screenshot' || p === 'camera' || p === 'automation');
+    .filter((p) => p === 'screenshot' || p === 'camera' || p === 'automation' || p === 'runner');
   if (isValidAccelerator(raw.searchShortcut)) out.searchShortcut = raw.searchShortcut;
   out.favoriteFiles = sanitizeStringList(raw.favoriteFiles, 20);
   out.localModels = sanitizeLocalModels(raw.localModels, 10);
@@ -318,6 +333,15 @@ function sanitize(raw) {
   if (isValidAccelerator(raw.localModelShortcut)) out.localModelShortcut = raw.localModelShortcut;
   const lb = sanitizeBounds(raw.localModelBounds, 420, 480);
   if (lb) out.localModelBounds = lb;
+  if (typeof raw.runnerEnabled === 'boolean') out.runnerEnabled = raw.runnerEnabled;
+  if (isValidAccelerator(raw.runnerShortcut)) out.runnerShortcut = raw.runnerShortcut;
+  // Runner whitelist: bare executable names only (no paths, no shell
+  // characters), lowercased, max 20. Anything else is dropped.
+  out.runnerAllowedCommands = sanitizeStringList(raw.runnerAllowedCommands, 20)
+    .map((c) => String(c).trim().toLowerCase())
+    .filter((c) => /^[a-z0-9][a-z0-9._-]*$/.test(c));
+  const rb = sanitizeBounds(raw.runnerBounds, 480, 520);
+  if (rb) out.runnerBounds = rb;
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }

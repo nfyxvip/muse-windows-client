@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>任务执行器 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; display: flex; flex-direction: column; }
+  header { background: #fff; border-bottom: 1px solid #e3e3e3; padding: 10px 14px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #bbb; flex: 0 0 9px; }
+  .dot.on { background: #22a06b; }
+  .meta { flex: 1; min-width: 0; }
+  .name { font-weight: 600; }
+  .addr { font-size: 12px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header button { font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; white-space: nowrap; }
+  main { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 10px 12px; }
+  .card h3 { font-size: 13px; margin: 0 0 8px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row .folder { flex: 1; min-width: 0; font-size: 13px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .folder.empty { color: #999; }
+  button { font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; white-space: nowrap; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  textarea { width: 100%; min-height: 110px; resize: vertical; font-size: 13px; font-family: Consolas, "Microsoft YaHei", monospace; padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px; outline: none; }
+  textarea:focus { border-color: #111; }
+  .hint { font-size: 12px; color: #888; line-height: 1.6; margin: 6px 0 0; }
+  .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .steps li { font-size: 13px; font-family: Consolas, "Microsoft YaHei", monospace; background: #f7f7f7; border: 1px solid #e3e3e3; border-radius: 6px; padding: 6px 9px; word-break: break-all; }
+  .steps li .tag { float: right; font-size: 12px; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .steps li .tag.ok { color: #22a06b; }
+  .steps li .tag.bad { color: #c0392b; font-weight: 600; }
+  .steps li.running { border-color: #111; }
+  .steps li.done-ok { border-color: #22a06b; }
+  .steps li.done-fail { border-color: #c0392b; }
+  .status { font-size: 13px; min-height: 18px; }
+  .status.err { color: #c0392b; }
+  .status.ok { color: #22a06b; }
+  pre.report { background: #111; color: #eee; border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; margin: 0; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  footer { background: #fff; border-top: 1px solid #e3e3e3; padding: 8px 14px; font-size: 12px; color: #888; line-height: 1.6; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="statusDot"></span>
+  <div class="meta">
+    <div class="name">任务执行器</div>
+    <div class="addr" id="stateLine">正在读取配置…</div>
+  </div>
+  <button type="button" id="settingsBtn">设置</button>
+</header>
+<main>
+  <div class="card">
+    <h3>1. 选择文件夹</h3>
+    <div class="row">
+      <span class="folder empty" id="folderLabel">还没有选文件夹</span>
+      <button type="button" id="pickBtn">选择文件夹…</button>
+    </div>
+    <p class="hint">只能在授权文件夹里执行。先去“设置 → 文件与授权文件夹”里授权你的项目文件夹（例如 CI4 商城文件夹）。</p>
+  </div>
+  <div class="card">
+    <h3>2. 粘贴任务包</h3>
+    <textarea id="pkgInput" spellcheck="false" placeholder='把 Edison 在聊天里给你的任务包粘贴到这里，例如：&#10;{&#10;  "title": "检查 PHP 版本",&#10;  "steps": [ { "cmd": "php", "args": ["-v"] } ]&#10;}'></textarea>
+    <div class="btns" style="margin-top:8px">
+      <button type="button" id="parseBtn">解析任务</button>
+    </div>
+    <p class="hint">任务包是 JSON：一个标题 + 一份命令清单，每一步是 {"cmd": "程序名", "args": ["参数", …]}。命令只能是白名单里的程序（默认 php、composer、git、npm、node、npx），不能带路径或符号。</p>
+  </div>
+  <div class="card" id="stepsCard" style="display:none">
+    <h3>3. 待执行的步骤</h3>
+    <ul class="steps" id="stepsList"></ul>
+    <div class="btns" style="margin-top:10px">
+      <button type="button" id="runBtn" class="primary">执行</button>
+      <button type="button" id="abortBtn" style="display:none">中止</button>
+    </div>
+    <div class="status" id="runStatus"></div>
+  </div>
+  <div class="card" id="reportCard" style="display:none">
+    <h3>任务报告</h3>
+    <pre class="report" id="reportPre"></pre>
+    <div class="btns" style="margin-top:10px">
+      <button type="button" id="copyBtn">复制报告（贴回聊天）</button>
+      <button type="button" id="saveBtn">保存报告…</button>
+    </div>
+    <p class="hint">把报告复制回聊天，Edison 会检查结果，没问题就收工，有问题再改一轮。</p>
+  </div>
+</main>
+<footer>只跑你确认过的命令：每次执行前都会把全部步骤和文件夹列出来问你一次；白名单外的命令整包拒绝；不在授权文件夹里的事一概不做；没有任何人能远程触发执行。</footer>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let state = null; // { enabled, allowedCommands, authorizedFolders, shortcut }
+  let cwd = '';
+  let pkg = null; // parsed task package
+  let running = false;
+  let report = '';
+
+  function setStatus(text, kind) {
+    const el = $('runStatus');
+    el.textContent = text || '';
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  async function refreshState() {
+    try {
+      state = await window.museRunner.getState();
+    } catch (e) {
+      state = null;
+    }
+    const dot = $('statusDot');
+    if (state && state.enabled) {
+      dot.classList.add('on');
+      $('stateLine').textContent = '已开启 · 白名单：' + (state.allowedCommands || []).join('、');
+    } else {
+      dot.classList.remove('on');
+      $('stateLine').textContent = '还没有开启：去“设置 → 任务执行器”打开它，再授权一个文件夹。';
+    }
+    $('parseBtn').disabled = !(state && state.enabled);
+    $('runBtn').disabled = !(state && state.enabled) || !pkg;
+  }
+
+  $('pickBtn').addEventListener('click', async () => {
+    const res = await window.museRunner.pickFolder();
+    if (res && res.ok) {
+      cwd = res.folder;
+      const label = $('folderLabel');
+      label.textContent = cwd;
+      label.classList.remove('empty');
+      setStatus('');
+    } else if (res && res.reason === 'no-folders') {
+      setStatus('还没有授权文件夹：请先在设置 → 文件与授权文件夹里添加一个文件夹。', 'err');
+    } else if (res && res.reason === 'not-authorized') {
+      setStatus('这个文件夹不在授权列表里：请先在设置里授权它。', 'err');
+    } else if (res && res.reason === 'blocked') {
+      setStatus('这个文件夹在黑名单里，拒绝执行。', 'err');
+    }
+  });
+
+  $('parseBtn').addEventListener('click', async () => {
+    if (!state || !state.enabled) {
+      setStatus('任务执行器还没有开启：请先在设置 → 任务执行器里打开它。', 'err');
+      return;
+    }
+    const text = $('pkgInput').value;
+    const res = await window.museRunner.parse(text);
+    if (!res || !res.ok) {
+      pkg = null;
+      $('stepsCard').style.display = 'none';
+      setStatus(res && res.error ? res.error : '解析失败。', 'err');
+      return;
+    }
+    pkg = res;
+    const allowed = new Set((state.allowedCommands || []).map((c) => String(c).toLowerCase()));
+    const list = $('stepsList');
+    list.innerHTML = '';
+    let allAllowed = true;
+    pkg.steps.forEach((s, i) => {
+      const li = document.createElement('li');
+      li.id = 'step-' + i;
+      const ok = allowed.has(s.cmd.toLowerCase());
+      if (!ok) allAllowed = false;
+      const tag = document.createElement('span');
+      tag.className = 'tag ' + (ok ? 'ok' : 'bad');
+      tag.textContent = ok ? '白名单 ✓' : '不在白名单 ✗';
+      li.textContent = (i + 1) + '. ' + s.cmd + (s.args.length ? ' ' + s.args.join(' ') : '');
+      li.appendChild(tag);
+      list.appendChild(li);
+    });
+    $('stepsCard').style.display = '';
+    $('reportCard').style.display = 'none';
+    report = '';
+    if (!allAllowed) {
+      setStatus('有白名单外的命令，整包会被拒绝：去设置 → 任务执行器 → 白名单里加上它，或让 Edison 换一条白名单里的命令。', 'err');
+      $('runBtn').disabled = true;
+      return;
+    }
+    setStatus('已解析“' + pkg.title + '”，共 ' + pkg.steps.length + ' 步。选好文件夹后点“执行”。', 'ok');
+    $('runBtn').disabled = false;
+  });
+
+  $('runBtn').addEventListener('click', async () => {
+    if (!pkg || running) return;
+    if (!cwd) {
+      setStatus('请先选一个文件夹（必须是已授权的）。', 'err');
+      return;
+    }
+    running = true;
+    $('runBtn').disabled = true;
+    $('abortBtn').style.display = '';
+    $('parseBtn').disabled = true;
+    $('reportCard').style.display = 'none';
+    report = '';
+    setStatus('等待确认…（主进程会弹窗列出全部步骤）');
+    try {
+      const res = await window.museRunner.run(pkg, cwd);
+      if (res && !res.ok) {
+        if (res.reason !== 'cancelled') {
+          setStatus('没有执行：' + (res.reason || '已取消'), 'err');
+        } else {
+          setStatus('已取消。');
+        }
+      }
+      // Progress and the final report arrive through onProgress / onFinished.
+    } catch (e) {
+      setStatus('执行失败：' + e.message, 'err');
+    } finally {
+      running = false;
+      $('runBtn').disabled = false;
+      $('abortBtn').style.display = 'none';
+      $('parseBtn').disabled = false;
+    }
+  });
+
+  $('abortBtn').addEventListener('click', () => {
+    window.museRunner.abort();
+    setStatus('正在中止…');
+  });
+
+  window.museRunner.onProgress((info) => {
+    if (!info) return;
+    const li = $('step-' + info.index);
+    if (info.type === 'step-start') {
+      setStatus('正在执行第 ' + (info.index + 1) + ' 步：' + info.cmd + (info.args && info.args.length ? ' ' + info.args.join(' ') : ''));
+      if (li) li.classList.add('running');
+    } else if (info.type === 'step-done' && info.result) {
+      if (li) {
+        li.classList.remove('running');
+        li.classList.add(info.result.status === 'ok' ? 'done-ok' : 'done-fail');
+        const tag = li.querySelector('.tag');
+        if (tag) {
+          tag.textContent = info.result.status === 'ok' ? '成功 ✓' : info.result.status === 'timeout' ? '超时 ✗' : '失败 ✗';
+          tag.className = 'tag ' + (info.result.status === 'ok' ? 'ok' : 'bad');
+        }
+      }
+    }
+  });
+
+  window.museRunner.onFinished((info) => {
+    if (!info) return;
+    report = info.report || '';
+    $('reportPre').textContent = report;
+    $('reportCard').style.display = '';
+    if (info.aborted) {
+      setStatus('已中止：' + info.okCount + '/' + info.total + ' 步成功。', 'err');
+    } else if (info.okCount === info.total) {
+      setStatus('全部 ' + info.total + ' 步都成功了。复制报告贴回聊天，Edison 会检查。', 'ok');
+    } else {
+      setStatus(info.okCount + '/' + info.total + ' 步成功，有步骤失败了，看看报告里的输出。', 'err');
+    }
+  });
+
+  $('copyBtn').addEventListener('click', async () => {
+    if (!report) return;
+    await window.museRunner.copyReport(report);
+    setStatus('报告已复制到剪贴板，贴回聊天就行。', 'ok');
+  });
+
+  $('saveBtn').addEventListener('click', async () => {
+    if (!report) return;
+    const res = await window.museRunner.saveReport(report, cwd, pkg ? pkg.title : '任务报告');
+    if (res && res.ok) {
+      setStatus('报告已保存到：' + res.filePath, 'ok');
+    } else if (res && res.reason !== 'cancelled') {
+      setStatus('保存失败：' + (res.error || res.reason), 'err');
+    }
+  });
+
+  $('settingsBtn').addEventListener('click', () => window.museRunner.openSettings());
+  window.addEventListener('focus', refreshState);
+
+  refreshState();
+})();
+</script>
+</body>
+</html>

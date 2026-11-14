@@ -127,6 +127,15 @@
   </section>
 
   <section>
+    <h2>任务执行器</h2>
+    <p class="hint" style="margin:0 0 8px">执行 Edison 在聊天里给的命令清单（任务包）。只在授权文件夹里、只跑白名单里的命令，每次执行前都会把全部步骤列出来问你一次；报告由你自己复制回聊天。</p>
+    <label class="row"><input type="checkbox" id="runnerEnabled"> 任务执行器（默认关闭）</label>
+    <div class="field"><span>快捷键：</span><input type="text" id="runnerShortcut" spellcheck="false"></div>
+    <div class="field"><span>白名单：</span><textarea id="runnerAllowedCommands" spellcheck="false" rows="3" style="flex:1; font-size:13px; font-family:Consolas,'Microsoft YaHei',monospace; padding:6px 8px; border:1px solid #ccc; border-radius:6px; resize:vertical"></textarea></div>
+    <p class="hint">白名单一行一个程序名（只能是程序名，不能带路径或符号）。默认：php、composer、git、npm、node、npx。任务包里出现白名单外的命令，整包会被拒绝。改完点别处就保存。</p>
+  </section>
+
+  <section>
     <h2>文件与授权文件夹</h2>
     <p class="hint" style="margin:0 0 8px">壳子只会读取下面授权文件夹里的文件。拖文件进聊天、或用“发送文件到聊天”时，壳子会先核对：不在授权列表里的文件一律拒绝；黑名单里的文件夹即使在授权列表里也拒绝。授权之前，壳子什么文件都不读。</p>
     <div class="btns"><button id="sendFileBtn" type="button">发送文件到聊天…</button></div>
@@ -177,6 +186,7 @@
     if (st.screenshot === 'failed') problems.push('框选区域快捷键（' + (s.screenshotShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.search === 'failed') problems.push('文件名搜索快捷键（' + (s.searchShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (st.localModel === 'failed') problems.push('本地模型快捷键（' + (s.localModelShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
+    if (st.runner === 'failed') problems.push('任务执行器快捷键（' + (s.runnerShortcut || '') + '）注册失败，可能被其他软件占用了，请换一个。');
     if (problems.length) {
       warn.textContent = problems.join(' ');
       warn.style.display = 'block';
@@ -511,6 +521,9 @@
       $('automationAllowCalculator').checked = !!s.automationAllowCalculator;
       $('automationAllowExplorer').checked = !!s.automationAllowExplorer;
       $('automationAllowBrowser').checked = !!s.automationAllowBrowser;
+      $('runnerEnabled').checked = !!s.runnerEnabled;
+      $('runnerShortcut').value = s.runnerShortcut || '';
+      $('runnerAllowedCommands').value = (s.runnerAllowedCommands || []).join('\n');
       $('checkUpdatesOnStartup').checked = !!s.checkUpdatesOnStartup;
       $('zoomNow').textContent = Math.round((s.zoomFactor || 1) * 100) + '%';
       $('version').textContent = 'Muse Windows Client（非官方）· 每次改动都会立刻保存到本机配置文件';
@@ -611,6 +624,25 @@
   });
   $('cameraEnabled').addEventListener('change', (e) => save({ cameraEnabled: e.target.checked }));
   $('automationEnabled').addEventListener('change', (e) => save({ automationEnabled: e.target.checked }));
+  $('runnerEnabled').addEventListener('change', (e) => save({ runnerEnabled: e.target.checked }));
+  $('runnerShortcut').addEventListener('change', async (e) => {
+    const typed = e.target.value.trim();
+    const s = await save({ runnerShortcut: typed });
+    if (s) {
+      if (s.runnerShortcut !== typed) {
+        e.target.value = s.runnerShortcut;
+        status('快捷键格式不对，已恢复为 ' + s.runnerShortcut + '。');
+      }
+    }
+  });
+  $('runnerAllowedCommands').addEventListener('change', async (e) => {
+    const lines = e.target.value.split('\n').map((x) => x.trim()).filter((x) => x);
+    const s = await save({ runnerAllowedCommands: lines });
+    if (s) {
+      // Invalid names are dropped by the sanitizer; show what stuck.
+      e.target.value = (s.runnerAllowedCommands || []).join('\n');
+    }
+  });
   $('automationAllowNotepad').addEventListener('change', (e) => save({ automationAllowNotepad: e.target.checked }));
   $('automationAllowCalculator').addEventListener('change', (e) => save({ automationAllowCalculator: e.target.checked }));
   $('automationAllowExplorer').addEventListener('change', (e) => save({ automationAllowExplorer: e.target.checked }));
