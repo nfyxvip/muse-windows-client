@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>文件打包发送 — Muse</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1f1f1f; background: #f7f7f7; display: flex; flex-direction: column; }
+  header { background: #fff; border-bottom: 1px solid #e3e3e3; padding: 10px 14px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .meta { flex: 1; min-width: 0; }
+  .name { font-weight: 600; }
+  .addr { font-size: 12px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header button { font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; white-space: nowrap; }
+  main { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 10px 12px; }
+  .card h3 { font-size: 13px; margin: 0 0 8px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row .folder { flex: 1; min-width: 0; font-size: 13px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .folder.empty { color: #999; }
+  button { font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; white-space: nowrap; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .hint { font-size: 12px; color: #888; line-height: 1.6; margin: 6px 0 0; }
+  .files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; }
+  .files li { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 4px 0; border-top: 1px solid #f0f0f0; }
+  .files li:first-child { border-top: none; }
+  .files .rel { flex: 1; min-width: 0; font-family: Consolas, "Microsoft YaHei", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .files .size { color: #888; font-size: 12px; white-space: nowrap; }
+  .files li.skipped .rel { color: #aaa; text-decoration: line-through; }
+  .files li.skipped .why { color: #c0392b; font-size: 12px; white-space: nowrap; }
+  .status { font-size: 13px; min-height: 18px; }
+  .status.err { color: #c0392b; }
+  .status.ok { color: #22a06b; }
+  pre.pack { background: #111; color: #eee; border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; margin: 0; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  footer { background: #fff; border-top: 1px solid #e3e3e3; padding: 8px 14px; font-size: 12px; color: #888; line-height: 1.6; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <div class="meta">
+    <div class="name">文件打包发送</div>
+    <div class="addr">把一个授权文件夹打包成一份文本，复制进聊天发给 Edison</div>
+  </div>
+  <button type="button" id="closeBtn">关闭</button>
+</header>
+<main>
+  <div class="card">
+    <h3>1. 选择文件夹</h3>
+    <div class="row">
+      <span class="folder empty" id="folderLabel">还没有选文件夹</span>
+      <button type="button" id="pickBtn">选择文件夹…</button>
+    </div>
+    <p class="hint">只能打包已授权的文件夹。先去“设置 → 文件与授权文件夹”里授权你的项目文件夹（例如 CI4 商城文件夹）。</p>
+  </div>
+  <div class="card" id="filesCard" style="display:none">
+    <h3>2. 选择要打包的文件</h3>
+    <div class="btns" style="margin-bottom:8px">
+      <button type="button" id="scanBtn">扫描文件夹</button>
+      <button type="button" id="allBtn">全选</button>
+      <button type="button" id="noneBtn">全不选</button>
+    </div>
+    <ul class="files" id="filesList"></ul>
+    <div class="status" id="scanStatus"></div>
+  </div>
+  <div class="card" id="packCard" style="display:none">
+    <h3>3. 文件包</h3>
+    <div class="btns" style="margin-bottom:8px">
+      <button type="button" id="buildBtn" class="primary">生成文件包</button>
+      <button type="button" id="copyBtn" disabled>复制到剪贴板</button>
+      <button type="button" id="saveBtn" disabled>保存为文件…</button>
+    </div>
+    <div class="status" id="packStatus"></div>
+    <pre class="pack" id="packPre" style="display:none; margin-top:8px"></pre>
+    <p class="hint">复制后直接粘贴进聊天就行，Edison 会读里面的文件内容。</p>
+  </div>
+</main>
+<footer>只读授权文件夹里的东西。.env、密钥、证书这类文件从不打包；vendor、node_modules、.git、CI4 的 writable 运行时目录也都排除；单个文件超过 128 KB、整包超过 512 KB 的部分会列在“被跳过”里。打包前看一眼清单，确认没有不该发的东西。</footer>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let cwd = '';
+  let scan = null; // { ok, files: [{rel, size, status, reason}] }
+  let pack = '';
+
+  function setScanStatus(text, kind) {
+    const el = $('scanStatus');
+    el.textContent = text || '';
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function setPackStatus(text, kind) {
+    const el = $('packStatus');
+    el.textContent = text || '';
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  function selectedRels() {
+    const out = [];
+    document.querySelectorAll('#filesList input[type="checkbox"]:checked').forEach((cb) => {
+      out.push(cb.getAttribute('data-rel'));
+    });
+    return out;
+  }
+
+  function renderFiles() {
+    const list = $('filesList');
+    list.innerHTML = '';
+    if (!scan || !scan.files || !scan.files.length) {
+      const d = document.createElement('div');
+      d.className = 'hint';
+      d.textContent = '这个文件夹里没有文件。';
+      list.appendChild(d);
+      return;
+    }
+    let included = 0;
+    let includedBytes = 0;
+    scan.files.forEach((f) => {
+      const li = document.createElement('li');
+      const rel = document.createElement('span');
+      rel.className = 'rel';
+      rel.textContent = f.rel;
+      rel.title = f.rel;
+      if (f.status === 'include') {
+        included++;
+        includedBytes += f.size;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.setAttribute('data-rel', f.rel);
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = fmtBytes(f.size);
+        li.appendChild(cb);
+        li.appendChild(rel);
+        li.appendChild(size);
+      } else {
+        li.classList.add('skipped');
+        const why = document.createElement('span');
+        why.className = 'why';
+        why.textContent = f.reason || '跳过';
+        li.appendChild(rel);
+        li.appendChild(why);
+      }
+      list.appendChild(li);
+    });
+    setScanStatus('可打包 ' + included + ' 个文件（' + fmtBytes(includedBytes) + '），已跳过 ' + (scan.files.length - included) + ' 个。', 'ok');
+  }
+
+  $('pickBtn').addEventListener('click', async () => {
+    const res = await window.musePack.pickFolder();
+    if (res && res.ok) {
+      cwd = res.folder;
+      scan = null;
+      pack = '';
+      const label = $('folderLabel');
+      label.textContent = cwd;
+      label.classList.remove('empty');
+      $('filesCard').style.display = '';
+      $('packCard').style.display = 'none';
+      $('packPre').style.display = 'none';
+      $('filesList').innerHTML = '';
+      setScanStatus('');
+      setPackStatus('');
+    } else if (res && res.reason === 'no-folders') {
+      setScanStatus('还没有授权文件夹：请先在设置 → 文件与授权文件夹里添加一个文件夹。', 'err');
+    } else if (res && res.reason === 'not-authorized') {
+      setScanStatus('这个文件夹不在授权列表里：请先在设置里授权它。', 'err');
+    } else if (res && res.reason === 'blocked') {
+      setScanStatus('这个文件夹在黑名单里，拒绝打包。', 'err');
+    }
+  });
+
+  $('scanBtn').addEventListener('click', async () => {
+    if (!cwd) {
+      setScanStatus('请先选一个文件夹。', 'err');
+      return;
+    }
+    const res = await window.musePack.scan(cwd);
+    if (!res || !res.ok) {
+      scan = null;
+      setScanStatus('扫描失败：' + (res && res.reason ? res.reason : '未知错误'), 'err');
+      return;
+    }
+    scan = res;
+    $('packCard').style.display = '';
+    renderFiles();
+  });
+
+  $('allBtn').addEventListener('click', () => {
+    document.querySelectorAll('#filesList input[type="checkbox"]').forEach((cb) => { cb.checked = true; });
+  });
+  $('noneBtn').addEventListener('click', () => {
+    document.querySelectorAll('#filesList input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+  });
+
+  $('buildBtn').addEventListener('click', async () => {
+    if (!cwd || !scan) {
+      setPackStatus('请先选文件夹并扫描。', 'err');
+      return;
+    }
+    const res = await window.musePack.build(cwd, selectedRels());
+    if (!res || !res.ok) {
+      pack = '';
+      setPackStatus('生成失败：' + (res && res.reason ? res.reason : '未知错误'), 'err');
+      return;
+    }
+    pack = res.pack || '';
+    $('packPre').textContent = pack;
+    $('packPre').style.display = '';
+    $('copyBtn').disabled = false;
+    $('saveBtn').disabled = false;
+    setPackStatus('已生成：' + res.included.length + ' 个文件，共 ' + fmtBytes(res.totalBytes) + (res.skipped.length ? '；跳过 ' + res.skipped.length + ' 个（见包末尾）。' : '。'), 'ok');
+  });
+
+  $('copyBtn').addEventListener('click', async () => {
+    if (!pack) return;
+    await window.musePack.copy(pack);
+    setPackStatus('已复制到剪贴板，直接粘贴进聊天就行。', 'ok');
+  });
+
+  $('saveBtn').addEventListener('click', async () => {
+    if (!pack) return;
+    const res = await window.musePack.save(pack, cwd);
+    if (res && res.ok) {
+      setPackStatus('已保存到：' + res.filePath, 'ok');
+    } else if (res && res.reason !== 'cancelled') {
+      setPackStatus('保存失败：' + (res.error || res.reason), 'err');
+    }
+  });
+
+  $('closeBtn').addEventListener('click', () => window.musePack.close());
+})();
+</script>
+</body>
+</html>

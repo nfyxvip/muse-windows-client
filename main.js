@@ -111,6 +111,20 @@
  * confirmation. There is no direct channel between Edison and the
  * client: the user is the only bridge, and the only approver.
  *
+ * v0.10.0 adds scheduled runner tasks (Phase 8, P2): a task
+ * package saved to run by itself daily or weekly while the app is
+ * open. Creating + enabling a task is the consent (no per-run
+ * dialog); whitelist, authorized folders and the master switch
+ * still apply. Missed slots are not caught up.
+ *
+ * v0.11.0 adds file pack sending (Phase 8, P3): one click packs an
+ * authorized folder into a single text bundle (tree + contents)
+ * to copy into the chat, instead of dragging files one by one.
+ * Only authorized folders; .env, keys, certificates and secrets
+ * by name are never packed; vendor/, node_modules/, .git/ and
+ * CI4 writable runtime dirs are excluded; text files only, with
+ * per-file and whole-pack size caps.
+ *
  * Phase 6 (v0.7.0):
  * - Cloud service entries: a "Connect" window that jumps to the
  *   services' web apps (Muse, Gmail, Outlook, Google Calendar,
@@ -161,6 +175,8 @@ const LOCAL_MODEL_WIDTH = 560;
 const LOCAL_MODEL_HEIGHT = 680;
 const RUNNER_WIDTH = 640;
 const RUNNER_HEIGHT = 720;
+const PACK_WIDTH = 680;
+const PACK_HEIGHT = 720;
 const FLOATING_SIZE = 64;
 
 let mainWindow = null;
@@ -179,6 +195,7 @@ let localModelStreamAbort = null;
 let runnerWindow = null;
 let runnerCurrentChild = null;
 let runnerAbortRequested = false;
+let packWindow = null;
 let lastFullCapture = null; // { image: nativeImage, rect: {x,y,width,height} in image pixels }
 let floatingWindow = null;
 let tray = null;
@@ -1947,6 +1964,267 @@ function startRunnerScheduler() {
   if (typeof runnerScheduleTimer.unref === 'function') runnerScheduleTimer.unref();
 }
 
+// --- Phase 8 (v0.11.0): file pack sending --------------------------------
+// P3 from the Claude Desktop comparison: one click packs an authorized
+// folder (or selected files in it) into a single text bundle — tree +
+// contents — that the user copies to the clipboard and pastes into the
+// chat, instead of dragging files one by one. The pack is built in the
+// main process and shown in the pack window first; nothing is sent
+// anywhere by the client itself.
+//
+// Rules:
+// - The root folder must be authorized (blocked folders always win).
+// - Never included: .env (any), keys / certificates / secrets by
+//   name, vendor/, node_modules/, .git/ and other tooling folders,
+//   CI4 writable runtime dirs, minified files, images and other
+//   binaries, files over the caps.
+// - Text files only: an allowlist of source extensions, plus a NUL
+//   sniff when reading. Per-file cap 128 KB, whole-pack cap 512 KB;
+//   anything over is listed as skipped with the reason.
+
+const PACK_MAX_FILE_BYTES = 128 * 1024;
+const PACK_MAX_TOTAL_BYTES = 512 * 1024;
+const PACK_MAX_FILES = 200;
+const PACK_MAX_DEPTH = 8;
+
+const PACK_EXCLUDED_DIRS = new Set(['node_modules', 'vendor', '.git', '.idea', '.vscode', '__pycache__', '.svn', '.hg']);
+const PACK_EXCLUDED_PATH_PARTS = ['writable/cache', 'writable/logs', 'writable/session', 'writable/uploads', 'writable/debugbar'];
+const PACK_TEXT_EXTS = new Set(['php', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'htm', 'css', 'scss', 'sass', 'less', 'json', 'md', 'markdown', 'txt', 'xml', 'yml', 'yaml', 'ini', 'sql', 'sh', 'bat', 'ps1', 'vue', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'lock', 'dist', 'example', 'gitignore', 'htaccess', 'editorconfig']);
+const PACK_TEXT_BASENAMES = new Set(['readme', 'license', 'dockerfile', 'makefile', 'composer.json', 'package.json']);
+// Basename test: .env (any form), credentials, secrets, keys/certs,
+// databases. Deliberately conservative — a skipped file is listed
+// with its reason, and the user can rename it if it really belongs.
+const PACK_DENIED_NAME = /(^|\.)env$|credential|secret|\.pem$|\.key$|id_rsa|\.p12$|\.pfx$|\.sqlite3?$|\.db$|\.cer$|\.crt$/i;
+
+function formatPackBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function packRelPath(parts) {
+  return parts.join('/');
+}
+
+function packIsExcludedDir(relParts, name) {
+  if (PACK_EXCLUDED_DIRS.has(name)) return true;
+  const rel = packRelPath(relParts).toLowerCase();
+  return PACK_EXCLUDED_PATH_PARTS.some((p) => rel === p || rel.startsWith(p + '/'));
+}
+
+/** Classify one file for packing. Pure apart from the stat call. */
+function classifyPackFile(full, relParts) {
+  const rel = packRelPath(relParts);
+  const name = relParts[relParts.length - 1];
+  const lower = name.toLowerCase();
+  let stat;
+  try {
+    stat = fs.statSync(full);
+  } catch (_) {
+    return { rel, full, size: 0, status: 'skip', reason: '读不到' };
+  }
+  if (!stat.isFile()) return { rel, full, size: stat.size, status: 'skip', reason: '不是文件' };
+  if (PACK_DENIED_NAME.test(lower)) {
+    return { rel, full, size: stat.size, status: 'skip', reason: '文件名疑似含密钥（.env / 密钥 / 证书），从不打包' };
+  }
+  if (lower.endsWith('.min.js') || lower.endsWith('.min.css')) {
+    return { rel, full, size: stat.size, status: 'skip', reason: '压缩后的文件（.min.js / .min.css）' };
+  }
+  const ext = lower.includes('.') ? lower.split('.').pop() : '';
+  const base = lower.replace(/\.[^.]*$/, '');
+  const isText = PACK_TEXT_EXTS.has(ext) || PACK_TEXT_BASENAMES.has(lower) || PACK_TEXT_BASENAMES.has(base);
+  if (!isText) return { rel, full, size: stat.size, status: 'skip', reason: '不是文本文件类型' };
+  if (stat.size > PACK_MAX_FILE_BYTES) {
+    return { rel, full, size: stat.size, status: 'skip', reason: `单个文件太大（超过 ${PACK_MAX_FILE_BYTES / 1024} KB）` };
+  }
+  return { rel, full, size: stat.size, status: 'include' };
+}
+
+/**
+ * Walk an authorized folder and classify every file.
+ * Returns { ok, reason?, root, files: [{rel, full, size, status, reason}], scanned }.
+ */
+function scanPackFiles(root) {
+  const gate = config.authorizeFile(root, config.get('authorizedFolders'), config.get('blockedFolders'));
+  if (!gate.ok) return { ok: false, reason: gate.reason, root, files: [], scanned: 0 };
+  try {
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+      return { ok: false, reason: 'missing-folder', root, files: [], scanned: 0 };
+    }
+  } catch (_) {
+    return { ok: false, reason: 'missing-folder', root, files: [], scanned: 0 };
+  }
+  const blocked = config.get('blockedFolders') || [];
+  const isBlocked = (dir) => blocked.some((b) => dir === b || dir.startsWith(b + path.sep));
+  const files = [];
+  let scanned = 0;
+  const walk = (dir, depth, relParts) => {
+    if (files.length >= PACK_MAX_FILES * 2 || depth > PACK_MAX_DEPTH) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return; // unreadable folder: skip it quietly.
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      const rel = [...relParts, e.name];
+      if (e.isDirectory()) {
+        if (e.name.startsWith('.')) continue; // hidden folders (.git etc.)
+        if (packIsExcludedDir(rel, e.name)) continue;
+        if (isBlocked(full)) continue;
+        walk(full, depth + 1, rel);
+      } else if (e.isFile()) {
+        scanned++;
+        files.push(classifyPackFile(full, rel));
+      }
+    }
+  };
+  walk(root, 0, []);
+  files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  return { ok: true, root, files, scanned };
+}
+
+/**
+ * Build the text bundle for the selected files (rel paths; empty
+ * means "all included files"). Returns { ok, reason?, pack,
+ * included: [{rel, size}], skipped: [{rel, reason}], totalBytes }.
+ */
+function buildFilePack(root, selected) {
+  const scan = scanPackFiles(root);
+  if (!scan.ok) return { ok: false, reason: scan.reason };
+  const wanted = new Set(Array.isArray(selected) ? selected : []);
+  const included = [];
+  const skipped = [];
+  let totalBytes = 0;
+  for (const f of scan.files) {
+    if (f.status === 'skip') {
+      skipped.push({ rel: f.rel, reason: f.reason });
+      continue;
+    }
+    if (wanted.size > 0 && !wanted.has(f.rel)) {
+      skipped.push({ rel: f.rel, reason: '未选中' });
+      continue;
+    }
+    if (totalBytes + f.size > PACK_MAX_TOTAL_BYTES) {
+      skipped.push({ rel: f.rel, reason: `打包总量超过 ${PACK_MAX_TOTAL_BYTES / 1024} KB 上限` });
+      continue;
+    }
+    let content;
+    try {
+      content = fs.readFileSync(f.full);
+    } catch (_) {
+      skipped.push({ rel: f.rel, reason: '读不到' });
+      continue;
+    }
+    if (content.subarray(0, 8192).includes(0)) {
+      skipped.push({ rel: f.rel, reason: '疑似二进制文件' });
+      continue;
+    }
+    included.push({ rel: f.rel, size: f.size, content: content.toString('utf8') });
+    totalBytes += f.size;
+  }
+  const lines = [];
+  const folderName = path.basename(root) || root;
+  lines.push(`# 文件包：${folderName}`);
+  lines.push('');
+  lines.push(`- 生成时间：${new Date().toLocaleString('zh-CN')}`);
+  lines.push(`- 文件夹：${root}`);
+  lines.push(`- 文件：${included.length} 个，共 ${formatPackBytes(totalBytes)}${skipped.length ? `；另有 ${skipped.length} 个文件被跳过（见末尾）` : ''}`);
+  lines.push('');
+  lines.push('## 文件清单');
+  for (const f of included) lines.push(`- ${f.rel} (${formatPackBytes(f.size)})`);
+  lines.push('');
+  for (const f of included) {
+    const ext = f.rel.includes('.') ? f.rel.split('.').pop().toLowerCase() : '';
+    const fence = f.content.includes('```') ? '````' : '```';
+    lines.push(`## ${f.rel}`);
+    lines.push(fence + (PACK_TEXT_EXTS.has(ext) ? ext : ''));
+    lines.push(f.content.replace(/\s+$/, ''));
+    lines.push(fence);
+    lines.push('');
+  }
+  if (skipped.length) {
+    lines.push('## 被跳过的文件');
+    for (const f of skipped) lines.push(`- ${f.rel}：${f.reason || '跳过'}`);
+    lines.push('');
+  }
+  return {
+    ok: true,
+    pack: lines.join('\n'),
+    included: included.map((f) => ({ rel: f.rel, size: f.size })),
+    skipped,
+    totalBytes,
+  };
+}
+
+function createPackWindow() {
+  if (packWindow && !packWindow.isDestroyed()) {
+    packWindow.show();
+    packWindow.focus();
+    return packWindow;
+  }
+  const saved = config.get('packBounds');
+  const opts = {
+    width: saved ? saved.width : PACK_WIDTH,
+    height: saved ? saved.height : PACK_HEIGHT,
+    minWidth: 520,
+    minHeight: 520,
+    title: '文件打包发送 — Muse',
+    icon: iconPath(),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'pack-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // local trusted page; no remote content.
+    },
+  };
+  if (saved) {
+    opts.x = saved.x;
+    opts.y = saved.y;
+  }
+  packWindow = new BrowserWindow(opts);
+  packWindow.setMenu(null);
+  packWindow.loadFile(path.join(__dirname, 'pack.html'));
+  packWindow.once('ready-to-show', () => {
+    packWindow.show();
+    packWindow.focus();
+  });
+  packWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      packWindow.hide();
+      event.preventDefault();
+    }
+  });
+  packWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      try {
+        config.update({ packBounds: packWindow.getBounds() });
+      } catch (_) { /* bounds are best-effort */ }
+      packWindow.hide();
+    }
+  });
+  packWindow.on('closed', () => {
+    packWindow = null;
+  });
+  return packWindow;
+}
+
+function togglePack() {
+  if (!packWindow || packWindow.isDestroyed()) {
+    createPackWindow();
+    return;
+  }
+  if (packWindow.isVisible()) {
+    packWindow.hide();
+  } else {
+    packWindow.show();
+    packWindow.focus();
+  }
+}
+
 // --- Floating button --------------------------------------------------
 // A small draggable always-on-top circle. Click toggles the main
 // window; right-click opens a small menu (open main window / hide the
@@ -2546,6 +2824,7 @@ function buildMenu() {
         { label: `文件名搜索 (${describeShortcut(config.get('searchShortcut'))})`, click: () => toggleSearch() },
         { label: `本地模型 (${describeShortcut(config.get('localModelShortcut'))})`, click: () => toggleLocalModel() },
         { label: `任务执行器 (${describeShortcut(config.get('runnerShortcut'))})`, click: () => toggleRunner() },
+        { label: '文件打包发送…', click: () => togglePack() },
         { label: '连接云端服务…', click: () => createConnectWindow() },
         {
           label: '本地操作',
@@ -2653,6 +2932,7 @@ function buildTrayMenu() {
     { label: '文件名搜索', click: () => toggleSearch() },
     { label: '本地模型', click: () => toggleLocalModel() },
     { label: '任务执行器', click: () => toggleRunner() },
+    { label: '文件打包发送…', click: () => togglePack() },
     { label: '连接云端服务…', click: () => createConnectWindow() },
     { label: '发送文件到聊天…', click: () => pickAndSendFiles() },
     { label: '重新加载', click: () => mainWindow && mainWindow.reload() },
@@ -3214,6 +3494,50 @@ ipcMain.handle('runner:schedule-run-now', async (event, id) => {
   return runTaskPackageWithConfirm(task.package, task.cwd);
 });
 
+// File pack IPC (used by pack-preload.js). Scanning and packing
+// happen in the main process; the page only displays and copies.
+ipcMain.handle('pack:get-state', () => ({
+  authorizedFolders: config.get('authorizedFolders') || [],
+}));
+ipcMain.handle('pack:pick-folder', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(packWindow || mainWindow, {
+    title: '选择要打包的文件夹（必须已授权）',
+    properties: ['openDirectory'],
+  });
+  if (canceled || !filePaths || filePaths.length === 0) return { ok: false, reason: 'cancelled' };
+  const folder = filePaths[0];
+  const gate = config.authorizeFile(folder, config.get('authorizedFolders'), config.get('blockedFolders'));
+  if (!gate.ok) {
+    return { ok: false, reason: gate.reason, folder };
+  }
+  return { ok: true, folder };
+});
+ipcMain.handle('pack:scan', (event, root) => scanPackFiles(root));
+ipcMain.handle('pack:build', (event, root, selected) => buildFilePack(root, selected));
+ipcMain.handle('pack:copy', (event, text) => {
+  clipboard.writeText(text || '');
+  return true;
+});
+ipcMain.handle('pack:save', async (event, text, root) => {
+  const folderName = root ? path.basename(root) : '文件包';
+  const stamp = new Date().toISOString().slice(0, 10);
+  const { canceled, filePath } = await dialog.showSaveDialog(packWindow || mainWindow, {
+    title: '保存文件包',
+    defaultPath: path.join(root || '', `文件包-${folderName}-${stamp}.md`),
+    filters: [{ name: 'Markdown', extensions: ['md'] }, { name: '文本', extensions: ['txt'] }],
+  });
+  if (canceled || !filePath) return { ok: false, reason: 'cancelled' };
+  try {
+    fs.writeFileSync(filePath, text || '', 'utf8');
+    return { ok: true, filePath };
+  } catch (err) {
+    return { ok: false, reason: 'failed', error: err && err.message ? err.message : String(err) };
+  }
+});
+ipcMain.on('pack:close', () => {
+  if (packWindow && !packWindow.isDestroyed()) packWindow.hide();
+});
+
 // Exported for smoke tests only (the app entry point ignores exports).
 module.exports = {
   config,
@@ -3249,6 +3573,11 @@ module.exports = {
   runnerOccurrenceFor,
   isRunnerTaskDue,
   checkDueRunnerTasks,
+  createPackWindow,
+  togglePack,
+  scanPackFiles,
+  buildFilePack,
+  classifyPackFile,
   searchFileNames,
   toggleFavoriteFile,
   CLOUD_SERVICES,

@@ -344,6 +344,8 @@ const DEFAULTS = Object.freeze({
   // Log of scheduled runs (newest first, max 20):
   // { taskId, name, at (ISO), ok, total, aborted, error }.
   runnerScheduleLog: [],
+  // Phase 8 (v0.11.0): file pack window bounds { x, y, width, height } or null.
+  packBounds: null,
   // Web page zoom factor, clamped to 0.5 – 2.0.
   zoomFactor: 1.0,
   // Last main-window bounds { x, y, width, height } or null.
@@ -427,6 +429,8 @@ function sanitize(raw) {
   if (rb) out.runnerBounds = rb;
   out.runnerScheduledTasks = sanitizeRunnerTasks(raw.runnerScheduledTasks, 20);
   out.runnerScheduleLog = sanitizeScheduleLog(raw.runnerScheduleLog, 20);
+  const pb = sanitizeBounds(raw.packBounds, 520, 520);
+  if (pb) out.packBounds = pb;
   if (typeof raw.zoomFactor === 'number' && Number.isFinite(raw.zoomFactor)) {
     out.zoomFactor = Math.min(2.0, Math.max(0.5, raw.zoomFactor));
   }
